@@ -1,0 +1,59 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: cortex-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-cortex}
+    ports:
+      - "5442:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cortex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: ./api
+    container_name: cortex-api
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8010:8000"
+    volumes:
+      - ./api:/app
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-cortex}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    restart: unless-stopped
+
+  mcp:
+    build: ./mcp
+    container_name: cortex-mcp
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    ports:
+      - "8011:8001"
+    volumes:
+      - ./mcp:/app
+    environment:
+      CORTEX_BASE_URL: http://api:8000
+      CORTEX_API_KEY: ${CORTEX_API_KEY:-}
+      MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
+      MCP_PORT: "8001"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-cortex}
+    restart: unless-stopped
+
+volumes:
+  pgdata:
