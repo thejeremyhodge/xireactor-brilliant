@@ -46,5 +46,5 @@ dist/
 scripts/private/
 *.bak-*/
 skill/.xireactor/
-.claude/projects/
-.claude/logs/
+.claude/
+.pi/

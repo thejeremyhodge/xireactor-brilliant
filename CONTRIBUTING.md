@@ -78,6 +78,14 @@ File issues at [github.com/thejeremyhodge/xireactor-brilliant/issues](https://gi
 - **Features:** Describe the use case, not just the solution
 - **Questions:** Ask away — no issue is too basic
 
+## For Maintainers
+
+Maintainers of this repository may keep additional local directories alongside the tracked source — planning and operational notes, marketing-site sources, research scratch, and tooling configuration. These live in the working tree but are excluded via `.gitignore` and never pushed. They exist only to keep the maintainer's day-to-day workflow in one place.
+
+Contributors do not need any of this. A normal clone of `main` (or `dev`) gives you everything required to build, test, and contribute — the Dev Setup above is the complete picture. If `bash tests/demo_e2e.sh` passes on a fresh clone, you're ready to open a PR.
+
+If you notice anything referenced in tracked code or docs that appears to live only in a gitignored path, that's a bug — please open an issue. Public-facing functionality should always resolve against files committed to the repo.
+
 ## Security
 
 Security vulnerabilities should **not** be filed as public issues. Use [GitHub's private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability) or email the maintainer directly.
