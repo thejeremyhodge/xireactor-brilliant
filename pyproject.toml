@@ -1,0 +1,47 @@
+# Pytest + coverage configuration only.
+# This file intentionally does NOT declare build-system or package metadata —
+# xiReactor ships as docker images, not as a Python package.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
+markers = [
+    "integration: requires a running API + Postgres stack",
+    "slow: test takes noticeable wall time (>1s)",
+    "destructive: mutates shared state — do not parallelize",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:psycopg",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["api", "mcp", "tools"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/admin_bootstrap.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
