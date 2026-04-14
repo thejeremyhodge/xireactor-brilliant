@@ -1,6 +1,6 @@
 # xiReactor Brilliant
 
-**v0.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+**v0.2.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
 
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent
@@ -70,6 +70,8 @@ The repo ships with seeded demo users and their API keys hardcoded in the end-to
 bash tests/demo_e2e.sh
 ```
 
+The script targets `http://localhost:8010` by default. Override with `BASE_URL` if you run the stack on a different host or port — e.g. `BASE_URL=http://localhost:8020 bash tests/demo_e2e.sh`.
+
 The demo uses these seeded keys directly:
 
 - Admin: `bkai_adm1_testkey_admin`
@@ -92,7 +94,7 @@ If you missed the log (or restarted with an already-bootstrapped DB), mint a fre
 ```bash
 curl -X POST http://localhost:8010/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"you@example.com","password":"YOUR_ADMIN_PASSWORD"}'
+  -d '{"email":"admin@example.com","password":"YOUR_ADMIN_PASSWORD"}'
 ```
 
 Expected response:
@@ -104,7 +106,7 @@ Expected response:
     "id": "usr_xr_admin",
     "org_id": "org_demo",
     "display_name": "xiReactor Admin",
-    "email": "you@example.com",
+    "email": "admin@example.com",
     "role": "admin",
     "department": "leadership",
     "is_active": true
@@ -125,10 +127,12 @@ Expected response shape:
 
 ```json
 {
-  "total": 12,
   "entries": [
     { "id": "...", "title": "...", "logical_path": "...", "content_type": "...", "sensitivity": "..." }
-  ]
+  ],
+  "total": 12,
+  "limit": 50,
+  "offset": 0
 }
 ```
 

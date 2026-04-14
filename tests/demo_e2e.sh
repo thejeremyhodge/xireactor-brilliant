@@ -324,6 +324,7 @@ section "13. Agent: Submit via Staging"
 call POST "/staging" "$AGENT_KEY" -d '{
     "target_path": "Agent/proposed-entry",
     "change_type": "create",
+    "content_type": "context",
     "proposed_title": "Agent Proposal",
     "proposed_content": "# Agent Idea\nThis was proposed by an agent.",
     "submission_category": "user_direct"
@@ -443,7 +444,8 @@ call POST "/import" "$ADMIN_KEY" -d '{
         {"filename": "import-test-1.md", "content": "# Import Test One\nThis entry links to [[Import Test Two]]."},
         {"filename": "import-test-2.md", "content": "# Import Test Two\nLinked from the first import."}
     ],
-    "base_path": "Imports"
+    "base_path": "Imports",
+    "source_vault": "demo-e2e"
 }'
 if [ "$HTTP_CODE" = "201" ]; then
     IMPORT_CREATED=$(echo "$BODY" | jq -r '.created')
