@@ -1,5 +1,21 @@
 # Contributing to xiReactor Brilliant
 
+## Branching Model
+
+This project uses a two-branch model:
+- **`main`** — Tagged releases. Always matches what's documented in the README's Getting Started. If you want to *use* Brilliant, clone `main`.
+- **`dev`** — Integration branch for in-progress work. If you want to contribute or follow the latest development, branch from `dev`.
+
+**Contributing a change:**
+1. Fork the repo (or create a feature branch if you have write access).
+2. Branch from `dev`: `git checkout dev && git pull && git checkout -b feature/your-change`
+3. Make your change, commit, push.
+4. Open a pull request against `dev` (not `main`).
+
+**Releases:** Maintainers periodically merge `dev` → `main` and cut a tagged release. Tags follow semver (`v0.2.0`, `v0.3.0`, etc.).
+
+Don't PR against `main` directly unless it's a documentation-only fix or a critical hotfix.
+
 ## Dev Setup
 
 ```bash
@@ -16,9 +32,10 @@ If `demo_e2e.sh` passes, your local stack is working.
 
 ## Branch Flow
 
-- Branch from `main`
+See **Branching Model** above for the `main` / `dev` split. Additional PR mechanics:
+
 - One logical change per PR
-- Rebase on `main` before requesting review
+- Rebase on `dev` before requesting review
 - Squash-merge is fine for single-commit PRs; rebase-merge for multi-commit
 
 ## Code Style
