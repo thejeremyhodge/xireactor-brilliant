@@ -1,4 +1,4 @@
-"""Smoke test — exercises all 11 MCP tools against the live Cortex API."""
+"""Smoke test — exercises all 11 MCP tools against the live Brilliant API."""
 
 import asyncio
 import os
@@ -32,7 +32,7 @@ async def test(name: str, coro):
 
 
 async def main():
-    print(f"Cortex MCP smoke test — {api.base_url}\n")
+    print(f"Brilliant MCP smoke test — {api.base_url}\n")
 
     # 1. Health check (direct, not an MCP tool)
     await test("health", api.get("/health"))

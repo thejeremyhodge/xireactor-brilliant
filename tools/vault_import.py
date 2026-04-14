@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Obsidian Vault Import CLI for xiReactor Cortex.
+Obsidian Vault Import CLI for xiReactor Brilliant.
 
 Walks an Obsidian vault directory, collects .md files, and sends them
-to the Cortex /import API endpoint. Supports preview (dry-run) mode
+to the Brilliant /import API endpoint. Supports preview (dry-run) mode
 to check for collisions before committing.
 
 Dependencies: Python 3.8+ stdlib + requests
@@ -197,7 +197,7 @@ def execute_import(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Import an Obsidian vault into xiReactor Cortex",
+        description="Import an Obsidian vault into xiReactor Brilliant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -220,7 +220,7 @@ Examples:
     parser.add_argument(
         "--api-url",
         default="http://localhost:8010",
-        help="Cortex API base URL (default: http://localhost:8010)",
+        help="Brilliant API base URL (default: http://localhost:8010)",
     )
     parser.add_argument(
         "--api-key",

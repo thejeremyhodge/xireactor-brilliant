@@ -37,7 +37,8 @@ def _assign_governance_tier(
 
     Four-tier escalation model:
       Tier 1 — Auto-approve: creates (non-sensitive), appends, links,
-               admin/editor web_ui writes. No checks needed.
+               agent updates (non-sensitive), admin/editor web_ui writes.
+               No checks needed.
       Tier 2 — Auto-approve with conflict detection: updates and modifications
                on non-sensitive content. Inline checks; clean = auto-approve,
                conflicts escalate to Tier 3.
@@ -61,6 +62,8 @@ def _assign_governance_tier(
     if change_type == "append":
         return 1
     if change_type == "create_link":
+        return 1
+    if change_type == "update" and sensitivity in (None, "shared") and source == "agent":
         return 1
 
     # Tier 2: everything else (updates, modifications on non-sensitive content)

@@ -1,4 +1,4 @@
-"""xiReactor Cortex Remote MCP Server — Streamable HTTP with OAuth 2.1 for Claude Co-work."""
+"""xiReactor Brilliant Remote MCP Server — Streamable HTTP with OAuth 2.1 for Claude Co-work."""
 
 from __future__ import annotations
 
@@ -209,7 +209,7 @@ mcp = FastMCP(
 mcp.settings.debug = False
 mcp._custom_starlette_routes = getattr(mcp, "_custom_starlette_routes", [])
 
-# Register all 11 Cortex tools
+# Register all 11 Brilliant tools
 api = CortexClient()
 register_tools(mcp, api)
 

@@ -1,4 +1,4 @@
-"""Cortex API HTTP client with auth and error handling."""
+"""Brilliant API HTTP client with auth and error handling."""
 
 import os
 
@@ -6,7 +6,7 @@ import httpx
 
 
 class CortexClient:
-    """Async HTTP client for the Cortex REST API."""
+    """Async HTTP client for the Brilliant REST API."""
 
     def __init__(self):
         self.base_url = os.environ.get("CORTEX_BASE_URL", "http://localhost:8010").rstrip("/")

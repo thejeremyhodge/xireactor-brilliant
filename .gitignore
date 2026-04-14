@@ -24,6 +24,7 @@ pgdata/
 
 # Dev-only
 skill/*.zip
+!skill/knowledge-base.zip
 skill/*.bak
 tests/concurrency_harness.py
 /tmp-*

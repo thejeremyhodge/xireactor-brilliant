@@ -1,4 +1,4 @@
-"""xiReactor Cortex MCP Server — exposes KB tools via stdio for Claude Desktop."""
+"""xiReactor Brilliant MCP Server — exposes KB tools via stdio for Claude Desktop."""
 
 from __future__ import annotations
 

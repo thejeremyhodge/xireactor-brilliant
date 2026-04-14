@@ -1,0 +1,7 @@
+# Dev-only test dependencies (not shipped in public repo)
+aiohttp>=3.9,<4
+
+# Pytest integration tests (tests/test_*.py)
+pytest>=8.0,<9
+requests>=2.31,<3
+psycopg[binary]>=3.2,<4

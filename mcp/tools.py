@@ -1,4 +1,4 @@
-"""Shared Cortex MCP tool definitions — register on any FastMCP instance."""
+"""Shared Brilliant MCP tool definitions — register on any FastMCP instance."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from client import CortexClient
 
 
 def register_tools(mcp: FastMCP, api: CortexClient) -> None:
-    """Register all 18 Cortex tools on the given FastMCP server instance."""
+    """Register all 18 Brilliant tools on the given FastMCP server instance."""
 
     # -------------------------------------------------------------------
     # Read tools

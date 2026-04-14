@@ -1,9 +1,9 @@
 """Pydantic models for knowledge base entries."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # Valid content types matching the DB CHECK constraint
@@ -140,6 +140,36 @@ class TraversalResponse(BaseModel):
     origin_id: str
     depth: int
     neighbors: list[LinkNeighbor]
+
+
+# =============================================================================
+# Graph models (bulk org-wide graph for frontend /graph page)
+# =============================================================================
+
+
+class GraphNode(BaseModel):
+    id: str
+    title: str
+    content_type: str
+    logical_path: str
+    summary: str | None
+    updated_at: datetime
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    link_type: str
+    weight: float
+
+
+class GraphResponse(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    total_nodes: int
+    total_edges: int
+    truncated: bool
+    generated_at: datetime
 
 
 # =============================================================================
@@ -408,20 +438,52 @@ class UserRoleUpdate(BaseModel):
 
 
 class PermissionGrant(BaseModel):
-    user_id: str
+    """Grant a permission on an entry to a principal (user or group).
+
+    Accepts either ``principal_id`` (preferred) or the legacy ``user_id`` field
+    for one release of back-compat. ``principal_type`` defaults to ``'user'``
+    so existing callers that omit it continue to work unchanged.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    principal_type: Literal["user", "group"] = "user"
+    principal_id: str = Field(..., alias="user_id")
     role: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_either_principal_or_user_id(cls, data):
+        if isinstance(data, dict):
+            if "principal_id" not in data and "user_id" in data:
+                data = {**data, "principal_id": data["user_id"]}
+        return data
 
 
 class PathPermissionGrant(BaseModel):
+    """Grant a path-pattern permission to a principal (user or group)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
     path_pattern: str
-    user_id: str
+    principal_type: Literal["user", "group"] = "user"
+    principal_id: str = Field(..., alias="user_id")
     role: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_either_principal_or_user_id(cls, data):
+        if isinstance(data, dict):
+            if "principal_id" not in data and "user_id" in data:
+                data = {**data, "principal_id": data["user_id"]}
+        return data
 
 
 class EntryPermissionResponse(BaseModel):
     id: str
     entry_id: str
-    user_id: str
+    principal_type: str
+    principal_id: str
     role: str
     granted_by: str
     created_at: datetime
@@ -430,7 +492,84 @@ class EntryPermissionResponse(BaseModel):
 class PathPermissionResponse(BaseModel):
     id: str
     path_pattern: str
-    user_id: str
+    principal_type: str
+    principal_id: str
     role: str
     granted_by: str
     created_at: datetime
+
+
+# =============================================================================
+# Group models (permissions v2 — P1)
+# =============================================================================
+
+
+class GroupCreate(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class GroupResponse(BaseModel):
+    id: str
+    org_id: str
+    name: str
+    description: str | None
+    created_by: str
+    created_at: datetime
+    member_count: int | None = None
+
+
+class GroupMemberGrant(BaseModel):
+    user_id: str
+
+
+class GroupMemberResponse(BaseModel):
+    group_id: str
+    user_id: str
+    org_id: str
+    added_by: str
+    added_at: datetime
+
+
+class GroupDetailResponse(BaseModel):
+    id: str
+    org_id: str
+    name: str
+    description: str | None
+    created_by: str
+    created_at: datetime
+    members: list[GroupMemberResponse] | None = None  # None when caller is non-member
+
+
+# =============================================================================
+# Comment models (spec 0026 — first-class comments subsystem)
+# =============================================================================
+
+
+VALID_COMMENT_STATUSES = {"open", "resolved", "escalated", "dismissed"}
+VALID_COMMENT_UPDATE_STATUSES = {"resolved", "dismissed", "escalated"}
+
+
+class CommentCreate(BaseModel):
+    body: str
+    parent_comment_id: str | None = None
+
+
+class CommentUpdate(BaseModel):
+    status: str  # resolved | dismissed | escalated
+    escalated_to: str | None = None  # user_id; required when status == 'escalated'
+
+
+class CommentResponse(BaseModel):
+    id: str
+    org_id: str
+    entry_id: str
+    author_id: str
+    author_kind: str  # user | agent
+    body: str
+    status: str
+    escalated_to: str | None
+    parent_comment_id: str | None
+    created_at: datetime
+    resolved_at: datetime | None
+    resolved_by: str | None

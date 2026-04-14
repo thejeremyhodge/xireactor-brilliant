@@ -1,13 +1,13 @@
 ---
 name: knowledge-base
-description: xiReactor Cortex Knowledge Base assistant — manages sessions, daily notes, content routing, search, browsing, governance, and meeting intelligence via MCP. Use when the user asks about organizational knowledge, needs to look something up, wants to create or update KB content, says "resume", "compress", "daily", "search", or when you need institutional context.
+description: xiReactor Brilliant Knowledge Base assistant — manages sessions, daily notes, content routing, search, browsing, governance, and meeting intelligence via MCP. Use when the user asks about organizational knowledge, needs to look something up, wants to create or update KB content, says "resume", "compress", "daily", "search", or when you need institutional context.
 ---
 
-# Cortex Knowledge Base Assistant
+# Brilliant Knowledge Base Assistant
 
 ## Purpose
 
-You have access to the xiReactor Cortex Knowledge Base — a shared institutional KB with permission-based access, a governance pipeline for content review, and an intelligent tiered index map. You interact with it exclusively through MCP tools.
+You have access to the xiReactor Brilliant Knowledge Base — a shared institutional KB with permission-based access, a governance pipeline for content review, and an intelligent tiered index map. You interact with it exclusively through MCP tools.
 
 Use this skill to:
 - Answer questions about what the organization knows
@@ -15,6 +15,66 @@ Use this skill to:
 - Create new entries or propose changes to existing content
 - Explore how knowledge relates across the organization
 - Maintain daily session logs and institutional memory
+
+## Brilliant-Anchor Workflow
+
+The **Brilliant-Anchor** is the local folder the user connects to Brilliant via MCP. It is the primary surface for filesystem-first users — most never touch the web UI. Every anchor has this layout:
+
+```
+<anchor-root>/
+  inbox/        drop zone — files the user wants ingested (PDFs, transcripts, emails, notes)
+  outbox/       agent output zone — reports, summaries, exports the agent produces
+  archive/      ingested-inbox files land here post-routing, grouped by date
+  .claude/
+    CLAUDE.md   local, anchor-specific agent instructions
+    skills/     installed skills (optional)
+```
+
+The KB itself owns logical structure (`logical_path`, content types, graph). The folders are I/O buffers.
+
+### Inbox flow
+
+On every session start (and whenever the user says "process inbox"), list `inbox/`. For each file:
+
+1. Extract content (read the file; OCR / transcribe as needed).
+2. Route via `submit_staging` (agent key) or `create_entry` (interactive/API key) using the [Preserve Knowledge](#preserve-knowledge) routing table.
+3. Link to related entries with `create_link`.
+4. Move the file to `archive/{YYYY-MM-DD}/` (preserve original name + timestamp).
+5. Report what was ingested and where.
+
+Do not ask for permission — ingest and report. If a file is ambiguous, stage it and flag the uncertainty in the staging payload.
+
+### Outbox flow
+
+When you produce an artifact the user asked for (a report, a compiled summary, an export):
+
+1. Write it to `outbox/{YYYY-MM-DD}-{slug}.md` (or appropriate extension).
+2. Optionally file a pointer entry in the KB (`content_type: resource`, body links to the outbox filename).
+3. Tell the user the file path so they can open it directly.
+
+### Routing additions
+
+| User says... | Go to |
+|---|---|
+| "process the inbox", "what's in inbox", "ingest these files" | **Inbox flow** above |
+| "drop this file", "save this attachment" | Inbox flow (agent places it, then ingests) |
+| "write me a report", "export a summary", "produce a document" | **Outbox flow** above |
+
+### Maintaining Local `CLAUDE.md`
+
+`.claude/CLAUDE.md` is the anchor's **local behavioral memory** — distinct from KB `System/Rules/` entries, which are org-wide.
+
+- You MAY and SHOULD update it when the user establishes a durable anchor-local convention (examples: "always file meetings under `Meetings/Sales/`", "tag anything from Slack with `channel-general`"). Don't ask, just save and confirm.
+- You MUST preserve:
+  - the `session_init` bootstrap line,
+  - the documented folder layout,
+  - any user-pinned sections marked `<!-- pinned -->`.
+- You MUST NOT:
+  - delete unknown sections without confirming with the user,
+  - overwrite content silently — append changes under a `## History` tail with a date stamp.
+- **Local vs org rule of thumb:** if the convention applies to every user of the org, also save it as a `system` entry under `System/Rules/`. If it's specific to this anchor (one user's filing preference), only CLAUDE.md.
+
+---
 
 ## Authentication
 
@@ -69,6 +129,7 @@ At the beginning of every conversation, initialize your KB context:
    - Auto-scaled index depth (L4 for small KBs, L2 for large)
    - System entries (type registry, rules, conventions)
    - KB metadata (total entries, last updated, your role)
+   - `pending_reviews` — `{ count, items[] (top 5 tier ≥ 3), review_url }`. **If `count > 0` on resume, surface this in the standup briefing unconditionally — the user should not have to ask.**
 
 2. **Internalize the bundle.** You now know:
    - What topics the KB covers and how much content exists
@@ -93,7 +154,7 @@ Reconstruct context so the user picks up where they left off.
 1. **Call `session_init`** to load the current KB state
 2. **Find recent daily notes** — `search_entries(content_type="daily", limit=3)` to get recent session logs
 3. **Read the latest daily note** — `get_entry` on the most recent result to see what was discussed
-4. **Check pending governance** — `list_staging(status="pending")` to surface items awaiting review
+4. **Read `session_init.pending_reviews`** — no extra call needed; it was returned with the bundle. If `count > 0`, include the items in the briefing without being asked.
 5. **Present a briefing** — concise standup format:
 
 ```
@@ -101,11 +162,14 @@ Welcome back.
 
 **KB Status**: [N entries, last updated timestamp]
 **Last session** ([date]): [Brief summary from daily note]
-**Pending review**: [N items in staging]
+**Pending reviews**: [pending_reviews.count items awaiting review — list top 3 from pending_reviews.items with target_path + change_type + age_hours, link to pending_reviews.review_url]
+**Inbox**: [N files waiting in inbox/ — see Brilliant-Anchor Workflow]
 **Recent activity**: [New entries or updates since last session]
 
 What would you like to focus on?
 ```
+
+Only omit the **Pending reviews** line when `pending_reviews.count == 0`.
 
 6. **Create or append today's daily note** — see [Daily Notes](#daily-notes)
 
@@ -304,6 +368,16 @@ If the content type is ambiguous, check the type registry (loaded at session sta
 5. **Link to related entries** if relationships exist
 6. **Report** — entry title, path, and ID
 
+### Bulk Ingestion
+
+For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), reach for `import_vault`:
+
+- Always run `import_vault(path=..., dry_run=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
+- On the real run, capture the returned `batch_id`. Report it to the user.
+- If the import looks wrong in retrospect, call `rollback_import(batch_id)` — archives the imported entries, removes created links, purges pending staging items from the batch.
+
+Rule of thumb: **< 10 files → per-entry tools; ≥ 10 files from a single source → `import_vault`.**
+
 ---
 
 ## Update Content
@@ -405,11 +479,15 @@ process_staging()
 Runs type validation, duplicate detection, conflict detection, and version staleness checks on all pending items. Clean items are auto-approved.
 
 ### Governance tiers
+
 | Tier | Behavior | When |
 |---|---|---|
-| 1 | Auto-approved immediately | Low-risk creates (shared sensitivity), appends, admin/editor web_ui |
-| 2 | Human review required | Default for most submissions |
-| 3 | AI evaluation required | System/strategic sensitivity content |
+| 1 | Auto-approved immediately | Low-risk creates, appends, links; admin/editor web_ui |
+| 2 | Auto-approve with conflict checks | Updates on non-sensitive content; clean → sync; conflicts escalate to T3 |
+| 3 | AI or batch review (pending impl) | High-sensitivity content + T2 escalations; sits pending until `process_staging` or manual review |
+| 4 | Human-only | Deletions, sensitivity changes, governance rule mods; only `review_staging` can resolve |
+
+Tier 3 AI reviewer is spec'd (0027) but not yet shipped; T3 items currently await manual review via `review_staging` or batch evaluation via `process_staging`.
 
 ---
 
@@ -426,14 +504,15 @@ RLS (Row-Level Security) is enforced at the database level — you cannot bypass
 | **commenter** | Shared + assigned | No | Can submit (proposals) | No |
 | **viewer** | Non-private, non-system | No | No | No |
 
-### Granular Permissions (ACL)
+### Granular Permissions (v2)
 
-Beyond org-wide roles, admins and entry owners can grant per-entry or per-path access:
+Beyond org-wide roles, admins and entry owners can grant per-entry or per-path access through a unified `permissions` table with **polymorphic principals**:
 
-- **Entry-level grants** — share a specific entry with a user at any role level
-- **Path-level grants** — share all entries under a path prefix (e.g., `Projects/alpha`)
-- ACL grants are **additive** — they can only widen access, never restrict it
-- Sensitivity ceiling still applies — ACL grants respect the role's sensitivity limits
+- A grant's principal is either a `user` or a `group` — one table, `principal_kind + principal_id`.
+- **Group membership is resolved server-side.** Granting `group:engineering` access immediately propagates to every member; no per-user duplication.
+- Grants apply to a single entry or to a path prefix (e.g., `Projects/alpha/`).
+- Grants are **additive** — they widen access, never restrict it.
+- Sensitivity ceiling still applies — grants respect the role's sensitivity limits.
 
 ### What this means for you
 
@@ -474,11 +553,19 @@ The type registry is loaded at session start as part of system entries. Use it t
 | `list_staging` | List/filter staging pipeline items |
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
+| `import_vault` | Bulk-import markdown files; supports `dry_run` for collision preview; returns `batch_id` |
+| `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
 
 ## Auto-Save Rule
 
 **Never ask the user for permission to save.** When meaningful information comes up — learnings, preferences, project updates, corrections, action items — save it to the right entry immediately. After saving, briefly report what was saved and where. The user should never have to say "yes, save that."
+
+The same posture applies to the anchor folder and governance queue. Do these without being asked:
+
+- **Process the inbox on session start.** List `inbox/`, ingest each file (extract → route → archive), then report. If nothing is there, say nothing.
+- **Surface pending reviews** from `session_init.pending_reviews` on resume. If `count > 0`, name them in the briefing with paths and ages — don't wait for the user to ask about governance.
+- **Update local `.claude/CLAUDE.md`** when the user teaches a durable anchor-local convention. Save it, append a dated `## History` note, and confirm in one line. If the convention is org-wide, also file a `system` entry under `System/Rules/`.
 
 ## Anti-Patterns
 
@@ -489,3 +576,4 @@ Do NOT:
 - Use `create_entry` / `update_entry` / `append_entry` with an agent key — use `submit_staging`
 - Guess content types — check the registry
 - Create duplicate entries without checking for existing content at the target path
+- Promise the user you can post a comment on an entry through the skill — **comments are API-only**. There is no MCP `create_comment` tool. Direct users to the web UI or API when they want to comment.

@@ -1,6 +1,6 @@
-# Cortex MCP Server
+# Brilliant MCP Server
 
-MCP server that exposes the xiReactor Cortex knowledge base API as tools for Claude. Supports two transports:
+MCP server that exposes the xiReactor Brilliant knowledge base API as tools for Claude. Supports two transports:
 
 - **Stdio** — for Claude Desktop / Claude Code (local, single-user)
 - **Streamable HTTP** — for Claude Co-work (remote, multi-user, OAuth 2.1)
@@ -22,11 +22,13 @@ uv pip install -r requirements.txt
 
 | Env Var | Default | Description |
 |---|---|---|
-| `CORTEX_BASE_URL` | `http://localhost:8010` | Cortex API base URL |
+| `CORTEX_BASE_URL` | `http://localhost:8010` | Brilliant API base URL |
 | `CORTEX_API_KEY` | *(required)* | Bearer token for API auth |
 | `MCP_BASE_URL` | `http://localhost:8011` | External URL for OAuth issuer (remote only) |
 | `MCP_PORT` | `8001` | Port for remote HTTP server |
 | `TOKEN_EXPIRY_SECONDS` | `3600` | OAuth access token lifetime |
+
+> Note: `CORTEX_BASE_URL` / `CORTEX_API_KEY` env var names are preserved as infrastructure identifiers across the Cortex→Brilliant rename. Deployments already using them don't need to change configuration.
 
 ## Claude Desktop Integration (Stdio)
 
@@ -35,9 +37,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "cortex": {
-      "command": "/Users/admina/Projects/xireactor-cortex/mcp/.venv/bin/python",
-      "args": ["/Users/admina/Projects/xireactor-cortex/mcp/server.py"],
+    "brilliant": {
+      "command": "/absolute/path/to/xireactor-brilliant/mcp/.venv/bin/python",
+      "args": ["/absolute/path/to/xireactor-brilliant/mcp/server.py"],
       "env": {
         "PYTHONUNBUFFERED": "1",
         "CORTEX_API_KEY": "bkai_adm1_testkey_admin"
@@ -47,15 +49,15 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop after editing the config. The 11 Cortex tools will appear automatically.
+Restart Claude Desktop after editing the config. The 11 Brilliant tools will appear automatically.
 
 ## Claude Co-work Integration (Remote / Streamable HTTP)
 
 ### How it works
 
-1. The MCP server runs as a container alongside the Cortex API
+1. The MCP server runs as a container alongside the Brilliant API
 2. Claude Co-work connects via OAuth 2.1 (Dynamic Client Registration + PKCE)
-3. After auth, Co-work users get access to all 11 Cortex tools in their conversations
+3. After auth, Co-work users get access to all 11 Brilliant tools in their conversations
 
 ### Admin setup: Add custom connector
 
@@ -63,13 +65,13 @@ Restart Claude Desktop after editing the config. The 11 Cortex tools will appear
 2. Navigate to **Integrations** → **Custom connectors**
 3. Add a new connector:
    - **URL:** `http://localhost:8011/mcp` (or your deployed MCP URL)
-   - **Name:** Cortex Knowledge Base
+   - **Name:** Brilliant Knowledge Base
 4. Claude will auto-discover OAuth endpoints via `/.well-known/oauth-authorization-server`
 5. The first connection triggers Dynamic Client Registration — no manual client ID setup needed
 
 ### Server-side setup
 
-1. Provision a Cortex API key for the org:
+1. Provision a Brilliant API key for the org:
    - The key determines which org's data is accessible
    - One connector instance = one org's permissions (RLS-enforced)
 
@@ -95,7 +97,7 @@ Services:
 | Service | Internal Port | External Port | Description |
 |---|---|---|---|
 | `db` | 5432 | 5442 | PostgreSQL + pgvector |
-| `api` | 8000 | 8010 | Cortex REST API |
+| `api` | 8000 | 8010 | Brilliant REST API |
 | `mcp` | 8001 | 8011 | MCP remote server |
 
 ### Reverse proxy configuration
@@ -104,7 +106,7 @@ For production, the MCP server needs to be accessible at your public domain (e.g
 
 **Nginx:**
 ```nginx
-# Cortex API (existing)
+# Brilliant API (existing)
 location / {
     proxy_pass http://localhost:8010;
     proxy_set_header Host $host;

@@ -16,6 +16,8 @@ from models import (
     EntryUpdate,
     VALID_SENSITIVITIES,
 )
+from services.links import sync_entry_links
+from services.render import resolve_wiki_links
 
 router = APIRouter(tags=["entries"])
 
@@ -149,6 +151,19 @@ async def create_entry(
         )
         cur.row_factory = dict_row
         row = await cur.fetchone()
+
+        # Populate entry_links from [[wiki-links]] in content so the read-time
+        # resolver (services/render.py) has rows to join. Without this, MCP/UI
+        # writes render brackets literally. See spec 0030.
+        await sync_entry_links(
+            conn,
+            row["id"],
+            body.content,
+            user.org_id,
+            user.id,
+            user.source,
+        )
+
         return _row_to_response(row)
 
 
@@ -168,6 +183,12 @@ async def get_entry(
 
         if row is None:
             raise HTTPException(status_code=404, detail="Entry not found")
+
+        # Resolve [[wiki-links]] in content at read time (spec 0028).
+        # Short-circuits internally when content has no '[['.
+        row["content"] = await resolve_wiki_links(
+            row["content"], conn, str(row["id"])
+        )
 
         return _row_to_response(row)
 
@@ -365,6 +386,22 @@ async def update_entry(
         )
         cur.row_factory = dict_row
         row = await cur.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Entry not found")
+
+        # Re-sync entry_links whenever content changed (delete-then-insert
+        # inside this txn so removing a `[[...]]` drops its row). See spec 0030.
+        if body.content is not None:
+            await sync_entry_links(
+                conn,
+                row["id"],
+                body.content,
+                user.org_id,
+                user.id,
+                user.source,
+            )
+
         return _row_to_response(row)
 
 
@@ -455,6 +492,22 @@ async def append_entry(
         )
         cur.row_factory = dict_row
         row = await cur.fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Entry not found")
+
+        # Appended content may contain new `[[...]]` — re-sync so the read
+        # resolver sees them. Scope extension consistent with spec 0030 intent
+        # ("every write path").
+        await sync_entry_links(
+            conn,
+            row["id"],
+            new_content,
+            user.org_id,
+            user.id,
+            user.source,
+        )
+
         return _row_to_response(row)
 
 

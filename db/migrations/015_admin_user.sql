@@ -1,0 +1,6 @@
+-- 015_admin_user.sql
+-- Admin user bootstrap is handled by the API server at startup.
+-- See api/admin_bootstrap.py — reads ADMIN_EMAIL / ADMIN_PASSWORD from env vars.
+--
+-- This migration is intentionally a no-op.
+-- Depends on: 001_core.sql, 013_user_auth.sql

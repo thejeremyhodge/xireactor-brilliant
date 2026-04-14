@@ -1,6 +1,6 @@
-# xiReactor Cortex API Reference
+# xiReactor Brilliant API Reference
 
-> **Note:** Examples below use `http://localhost:8010` as the base URL. Replace with your deployed Cortex API URL if running remotely (e.g., `https://your-domain.example.com`).
+> **Note:** Examples below use `http://localhost:8010` as the base URL. Replace with your deployed Brilliant API URL if running remotely (e.g., `https://your-domain.example.com`).
 
 Base URL: `http://localhost:8010`
 
@@ -1179,3 +1179,89 @@ Sets `is_active=false`. Cannot deactivate yourself (returns 400).
 **`DELETE /users/{user_id}`** (admin only)
 
 Deactivates user + revokes all API keys. Cannot remove yourself (returns 400).
+
+---
+
+## Addenda (post-2026-04-04)
+
+The endpoints below were added or refined after this reference's initial snapshot. API-only — none are exposed through MCP.
+
+### Authentication
+
+**`POST /auth/login`**
+
+Exchange email + password for an API key.
+
+- Request: `{ "email": "...", "password": "..." }`
+- Response: `{ "api_key": "...", "user": { id, email, role, source, ... } }`
+- Note: response shape is `{api_key, user}` — **not** `{access_token}`. Use `api_key` directly as the bearer token; there is no JWT layer.
+
+### Invitations
+
+**`POST /invitations`** (admin only)
+
+Create a new invite.
+
+- Response field is `token` (not `invite_token`): `{ "code": "CTX-XXXX-XXXX", "token": "...", "expires_at": "..." }`
+
+**`POST /invitations/redeem`**
+
+Redeem an invite code.
+
+- Request: `{ "code": "CTX-XXXX-XXXX", "token": "...", "email": "...", "display_name": "..." }`
+- Response: `{ "api_key": "...", "user": {...} }`
+- Single-use on *attempt* — a failed redemption permanently invalidates the invite.
+
+### Comments
+
+Comments are API-only. There is no MCP tool for commenting.
+
+**`GET /entries/{id}/comments`**
+
+List top-level comments on an entry. Threaded replies returned separately via `/comments/{id}/replies`.
+
+**`POST /entries/{id}/comments`**
+
+Create a top-level comment. Body: `{ "body": "markdown", "parent_id": null }`. For a reply, set `parent_id` to the parent comment id.
+
+**`GET /comments/{id}/replies`**
+
+Return direct replies to a comment (one level; fetch recursively for deeper threads).
+
+**`PATCH /comments/{id}`**
+
+Edit or resolve a comment. Body: `{ "body": "...", "resolved": true|false }`. Editors can edit their own; admins can edit any.
+
+### Groups
+
+**`GET /groups`** / **`POST /groups`**
+
+List or create a group. Create body: `{ "name": "...", "description": "..." }`.
+
+**`GET /groups/{id}`** / **`PATCH /groups/{id}`** / **`DELETE /groups/{id}`**
+
+Read, rename/update, or delete a group. Delete cascades to group memberships and removes the group's permission grants.
+
+**`GET /groups/{id}/members`** / **`POST /groups/{id}/members`** / **`DELETE /groups/{id}/members/{user_id}`**
+
+List, add, or remove a group member. Group-scoped permissions (see [Permissions v2](#permissions)) propagate to members automatically.
+
+### Bulk Graph
+
+**`GET /graph`**
+
+Bulk-export the full graph visible to the caller as a nodes + edges payload for the frontend `/graph` view.
+
+- Response: `{ "nodes": [ { id, title, logical_path, content_type, ... } ], "edges": [ { source, target, link_type } ] }`
+- Deduplicates nodes and edges; RLS-filtered to the caller's scope.
+- Cached for 45 seconds per user.
+
+### Rendered Content
+
+**`GET /entries/{id}`** — rendering note (spec 0028)
+
+The response's `content` field is now rendered, not raw:
+
+- Frontmatter (`---\n…\n---` block, with or without a surrounding ```` ```yaml ```` fence) is stripped.
+- `[[wiki-links]]` are resolved to markdown links of the form `[Label](/kb/<uuid>)`. Unresolved wiki-links pass through literally.
+- The unrendered body is still available via the raw version endpoints; routine reads should use the rendered form.

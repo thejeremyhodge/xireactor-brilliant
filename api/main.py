@@ -1,4 +1,4 @@
-"""xiReactor Cortex API — FastAPI application entrypoint."""
+"""xiReactor Brilliant API — FastAPI application entrypoint."""
 
 from contextlib import asynccontextmanager
 
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="xiReactor Cortex API",
+    title="xiReactor Brilliant API",
     description="Knowledge base API with RLS-enforced permissions and governance pipeline",
     version="0.1.0",
     lifespan=lifespan,
@@ -46,6 +46,7 @@ async def health():
 _route_modules = [
     ("routes.entries", "entries", "/entries"),
     ("routes.links", "links", "/entries"),
+    ("routes.graph", "router", "/graph"),
     ("routes.index", "index", "/index"),
     ("routes.staging", "staging", "/staging"),
     ("routes.import_files", "router", "/import"),
@@ -57,6 +58,9 @@ _route_modules = [
     ("routes.auth", "router", "/auth"),
     ("routes.users", "members_router", "/org"),
     ("routes.users", "users_router", "/users"),
+    ("routes.groups", "groups_router", "/groups"),
+    ("routes.comments", "entries_comments_router", "/entries"),
+    ("routes.comments", "comments_router", "/comments"),
 ]
 
 for module_path, attr_name, prefix in _route_modules:

@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 
 from auth import UserContext, get_current_user
 from database import get_db
+from services.links import sync_entry_links
 from models import (
     ImportFile,
     ImportRequest,
@@ -430,10 +431,10 @@ async def import_files(
     for c in body.collisions:
         collision_lookup[c.filename] = c
 
-    # Track created entries for wiki-link resolution: title_lower -> entry_id
-    title_to_id: dict[str, str] = {}
-    # Track which files have wiki-links: [(source_entry_id, [link_targets])]
-    pending_links: list[tuple[str, list[str]]] = []
+    # Track (entry_id, content) for per-entry link resolution after all INSERTs
+    # complete. Deferred so that wiki-link targets created later in the same
+    # batch are queryable when we resolve.
+    pending_links: list[tuple[str, str]] = []
 
     async with get_db(user) as conn:
         # Create import batch record
@@ -587,68 +588,31 @@ async def import_files(
                     cur.row_factory = dict_row
                     row = await cur.fetchone()
                     entry_id = str(row["id"])
-                    title_to_id[title.lower()] = entry_id
                     created += 1
 
-                    # Store wiki-link targets for later resolution
+                    # Defer link resolution until all inserts complete so that
+                    # targets created later in this batch are resolvable.
                     if wiki_targets:
-                        pending_links.append((entry_id, wiki_targets))
+                        pending_links.append((entry_id, file.content))
 
             except Exception as exc:
                 errors.append(f"{file.filename}: {str(exc)}")
 
-        # Resolve wiki-links: create entry_links for targets that match
-        # created entries OR existing DB entries
-        for source_id, targets in pending_links:
-            for target_name in targets:
-                target_lower = target_name.strip().lower()
-                target_id = title_to_id.get(target_lower)
-
-                # If not found in import set, check existing DB entries
-                if not target_id:
-                    cur = await conn.execute(
-                        """SELECT id FROM entries
-                           WHERE LOWER(title) = LOWER(%(title)s)
-                             AND org_id = %(org_id)s
-                             AND status = 'published'
-                           LIMIT 1""",
-                        {"title": target_name.strip(), "org_id": user.org_id},
-                    )
-                    db_row = await cur.fetchone()
-                    if db_row:
-                        target_id = str(db_row[0])
-
-                if target_id and target_id != source_id:
-                    try:
-                        await conn.execute(
-                            """INSERT INTO entry_links (
-                                   org_id, source_entry_id, target_entry_id,
-                                   link_type, weight, metadata,
-                                   created_by, source,
-                                   import_batch_id
-                               ) VALUES (
-                                   %(org_id)s, %(source_entry_id)s, %(target_entry_id)s,
-                                   %(link_type)s, %(weight)s, %(metadata)s,
-                                   %(created_by)s, %(source)s,
-                                   %(import_batch_id)s::uuid
-                               )
-                               ON CONFLICT (org_id, source_entry_id, target_entry_id, link_type)
-                               DO NOTHING""",
-                            {
-                                "org_id": user.org_id,
-                                "source_entry_id": source_id,
-                                "target_entry_id": target_id,
-                                "link_type": "relates_to",
-                                "weight": 1.0,
-                                "metadata": "{}",
-                                "created_by": user.id,
-                                "source": user.source,
-                                "import_batch_id": batch_id,
-                            },
-                        )
-                        linked += 1
-                    except Exception as exc:
-                        errors.append(f"link {source_id}->{target_name}: {str(exc)}")
+        # Resolve wiki-links via the shared helper (spec 0030). Runs after all
+        # INSERTs so cross-file references within this batch resolve correctly.
+        for source_id, content in pending_links:
+            try:
+                linked += await sync_entry_links(
+                    conn,
+                    source_id,
+                    content,
+                    user.org_id,
+                    user.id,
+                    user.source,
+                    import_batch_id=batch_id,
+                )
+            except Exception as exc:
+                errors.append(f"link {source_id}: {str(exc)}")
 
         # Update batch with final counts
         await conn.execute(
