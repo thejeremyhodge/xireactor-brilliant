@@ -2,14 +2,14 @@
 
 ## Overview
 
-xiReactor Cortex is a Postgres-backed institutional knowledge base with a FastAPI REST layer, a four-tier governance pipeline for write control, row-level security for multi-tenant isolation, and an MCP integration layer that exposes the full tool surface to Claude Co-work and Claude Code. All agent writes are routed through a staging table; promotion to the live KB is gated by governance tier (auto-approve, conflict detection, AI review, or human approval).
+xiReactor Brilliant is a Postgres-backed institutional knowledge base with a FastAPI REST layer, a four-tier governance pipeline for write control, row-level security for multi-tenant isolation, and an MCP integration layer that exposes the full tool surface to Claude Co-work and Claude Code. All agent writes are routed through a staging table; promotion to the live KB is gated by governance tier (auto-approve, conflict detection, AI review, or human approval).
 
 ## Components
 
-- **api/** -- FastAPI application. Bearer-token auth via API keys (`api/auth.py`), entry CRUD, full-text and semantic search, staging/governance pipeline (`api/routes/staging.py`), session bootstrap (`api/routes/session.py`), vault import with batch rollback, invite-based onboarding.
-- **db/** -- 16 sequential migrations. Core schema, typed wiki-links, append-only versioning, governance staging, RLS policies, OAuth token store, content type registry, granular ACLs (entry-level and path-level), import batch tracking. Recursive CTE traversal for graph queries -- no AGE/graph extension dependency.
+- **api/** -- FastAPI application. Bearer-token auth via API keys (`api/auth.py`), entry CRUD, full-text and semantic search, staging/governance pipeline (`api/routes/staging.py`), session bootstrap (`api/routes/session.py`), vault import with batch rollback, invite-based onboarding, unified permissions (`api/routes/permissions.py`), comments (`api/routes/comments.py`), and render-time wiki-link resolution (`api/services/render.py`).
+- **db/** -- 21 sequential migrations. Core schema, typed wiki-links, append-only versioning, governance staging, RLS policies, OAuth token store, content type registry, unified polymorphic permissions (v2), comments, import batch tracking. Recursive CTE traversal for graph queries -- no AGE/graph extension dependency.
 - **mcp/** -- MCP server for Claude integration. `server.py` (stdio transport for Claude Code/Desktop), `remote_server.py` (Streamable HTTP + OAuth 2.1 for Claude Co-work), `tools.py` (shared tool definitions registered on either server), `client.py` (HTTP client to the REST API).
-- **skill/** -- Claude Co-work skill bundle. `SKILL.md` instructions and `references/` directory with API reference docs. Bootstraps Co-work sessions with KB-aware context.
+- **skill/** -- Claude Co-work skill bundle. `SKILL.md` instructions and `references/` directory with API reference docs. Bootstraps Co-work sessions with KB-aware context and an inbox/outbox review workflow.
 - **tools/** -- CLI helpers. `vault_import.py` for bulk Obsidian vault ingestion.
 
 ## Data Model
@@ -23,18 +23,21 @@ Key tables from `db/migrations/`:
 | `api_keys` | Per-user Bearer tokens. Three types: `interactive`, `agent`, `api_integration`. bcrypt-hashed, prefix-indexed. |
 | `entries` | Core KB content. Markdown body, logical path, content type, sensitivity level, tsvector full-text search, pgvector embedding (1536d), two-layer metadata (tags + domain_meta JSONB). |
 | `entry_versions` | Append-only version history. Immutable -- no UPDATE or DELETE policies. |
-| `entry_links` | Typed directed edges between entries. Six link types: `relates_to`, `supersedes`, `contradicts`, `depends_on`, `part_of`, `tagged_with`. |
+| `entry_links` | Typed directed edges between entries. Six link types: `relates_to`, `supersedes`, `contradicts`, `depends_on`, `part_of`, `tagged_with`. Kept in sync with entry content via write-path resolution of `[[wiki-link]]` references. |
 | `staging` | Governance induction queue. All agent writes land here before promotion. Tracks tier, status, evaluator decisions. |
 | `audit_log` | Append-only mutation log. Written by API server (admin role), not directly by users. |
 | `content_type_registry` | Canonical content types with alias support. Server-side validation at submission time. |
-| `entry_permissions` | Per-entry ACL grants (entry_id, user_id, role). Additive -- widens access beyond org-wide role. |
-| `path_permissions` | Pattern-based ACL grants (path prefix, user_id, role). Enables subtree-level access control. |
+| `permissions` | **v2 unified permissions.** Polymorphic grants keyed on `(principal_type, principal_id, resource_type, ...)`. `principal_type` is `user` or `group`; `resource_type` is `entry` or `path`. Replaces the legacy `entry_permissions` and `path_permissions` tables (migration 019 backfills existing rows). |
+| `groups`, `group_members` | User groups used as principals in the `permissions` table. Mutations emit `group_*` audit rows. |
+| `comments` | Threaded comments on entries. Author-kind tracks `user` vs `agent` provenance. Status lifecycle: `open` → `resolved` / `dismissed` / `escalated` (with `escalated_to` user id). API-only surface; not exposed via MCP. |
 | `project_assignments` | User-to-project access grants. Used in RLS subqueries for project-scoped visibility. |
 | `import_batches` | Tracks vault imports as rollback-able units. FK added to entries, staging, and entry_links for batch traceability. |
 
 ## Row-Level Security
 
 Every table with user data has RLS enabled and forced (even for table owners). Tenant isolation is enforced by matching `org_id = current_setting('app.org_id')` in every policy. The API layer sets four session variables at connection time via `SET LOCAL` -- `app.user_id`, `app.org_id`, `app.role`, `app.department` -- then switches to the appropriate Postgres role (`kb_admin`, `kb_editor`, `kb_commenter`, `kb_viewer`, `kb_agent`) with `SET LOCAL ROLE`. Using `SET LOCAL` (not `SET`) is critical in pooled connections: it scopes the role switch to the current transaction and prevents poisoning reused connections. See `api/database.py` and `db/migrations/004_rls.sql`.
+
+Permissions v2 layers on top of the org role: RLS helper functions consult the unified `permissions` table with the caller's user id plus the set of groups they belong to, unioning direct and group-inherited grants. Highest-role wins. Grants widen access additively -- they never restrict it beyond the sensitivity ceiling enforced at the role/policy layer. See `db/migrations/018_permissions_v2.sql` and `db/migrations/019_permissions_v2_rls.sql`.
 
 ## Governance Pipeline (4 Tiers)
 
@@ -78,6 +81,14 @@ Authentication uses Bearer tokens (API keys) via `api/auth.py`. The flow:
 
 Agent keys are write-restricted: they cannot INSERT/UPDATE/DELETE on `entries` directly. All agent writes go through staging. Interactive and API integration keys can write directly (still subject to RLS).
 
+`POST /auth/login` exchanges email + password for an API key. The response body is `{api_key, user}` -- the `api_key` value is used directly as the Bearer token on subsequent requests. There is no separate JWT access-token layer.
+
+## Render-Time Wiki-Link Resolution
+
+`GET /entries/{id}` rewrites content before returning it. Frontmatter (YAML block at the top of imported vault files) is stripped. `[[slug]]` and `[[slug|Alias]]` references are resolved to `[Title](/kb/{target_id})` markdown links by joining against `entry_links` -- the source entry has a row per wiki-link pointing at the resolved target. Unresolved slugs are preserved as literal text so nothing silently disappears.
+
+Write-path sync keeps `entry_links` current. `POST /entries` and `PUT /entries/{id}` call `sync_entry_links` (`api/services/links.py`) to re-derive link rows from the new content, adding/removing as needed. Without this, the render-time resolver had no rows to join against for newly-created content -- a gap that previously caused brand-new wiki-links to render literally until a background pass re-indexed them. See spec 0030.
+
 ## MCP Integration
 
 Two MCP server modes serve different clients:
@@ -93,8 +104,8 @@ Both servers register the same 18 tools from `mcp/tools.py`:
 **Onboarding:** `redeem_invite`
 **Import:** `import_vault`, `rollback_import`
 
-Tools are thin wrappers over `CortexClient` (`mcp/client.py`), which makes HTTP calls to the FastAPI REST layer. The MCP layer adds no business logic -- it translates MCP tool calls to REST requests.
+Tools are thin wrappers over the HTTP client (`mcp/client.py`), which makes calls to the FastAPI REST layer. The MCP layer adds no business logic -- it translates MCP tool calls to REST requests. The comments subsystem is intentionally kept out of the MCP tool surface; comments are a human/reviewer primitive served via REST only.
 
 ## Multi-Tenancy
 
-Row-level multi-tenancy via `org_id` on every data table. A single deployment hosts multiple organizations with strict isolation enforced at the Postgres level through RLS policies (not application-level filtering). Every query passes through `org_id = current_setting('app.org_id')` predicates. Granular permissions layer on top: Google Workspace-style org roles (admin/editor/commenter/viewer) + optional per-entry and per-path ACL grants that can only widen access, never restrict it beyond the sensitivity ceiling. See `db/migrations/004_rls.sql` and `db/migrations/011_entry_permissions.sql`.
+Row-level multi-tenancy via `org_id` on every data table. A single deployment hosts multiple organizations with strict isolation enforced at the Postgres level through RLS policies (not application-level filtering). Every query passes through `org_id = current_setting('app.org_id')` predicates. Granular permissions layer on top: Google Workspace-style org roles (admin/editor/commenter/viewer) + optional per-entry and per-path ACL grants (user or group principals) that can only widen access, never restrict it beyond the sensitivity ceiling. See `db/migrations/004_rls.sql` and `db/migrations/018_permissions_v2.sql`.

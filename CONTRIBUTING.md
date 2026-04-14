@@ -1,10 +1,10 @@
-# Contributing to xiReactor Cortex
+# Contributing to xiReactor Brilliant
 
 ## Dev Setup
 
 ```bash
-git clone https://github.com/thejeremyhodge/xireactor-cortex.git
-cd xireactor-cortex
+git clone https://github.com/thejeremyhodge/xireactor-brilliant.git
+cd xireactor-brilliant
 cp .env.sample .env
 # Edit .env: set ADMIN_PASSWORD to something other than the default
 docker compose up -d
@@ -55,7 +55,7 @@ chore: bump anthropic SDK to 0.40
 
 ## Issues
 
-File issues at [github.com/thejeremyhodge/xireactor-cortex/issues](https://github.com/thejeremyhodge/xireactor-cortex/issues).
+File issues at [github.com/thejeremyhodge/xireactor-brilliant/issues](https://github.com/thejeremyhodge/xireactor-brilliant/issues).
 
 - **Bugs:** Include `docker compose logs` output and the steps to reproduce
 - **Features:** Describe the use case, not just the solution
