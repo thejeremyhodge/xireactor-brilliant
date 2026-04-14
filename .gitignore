@@ -31,3 +31,20 @@ tests/concurrency_harness.py
 
 # Test/cache
 .pytest_cache/
+
+# ─── Private maintainer surfaces — never commit ───────────────
+# These paths are used locally for planning, marketing, research,
+# and video production. They must not land in the public repo.
+# See spec 0033 for migration context.
+.xireactor/
+docs/video-series/
+www/
+research/
+mockup/
+backups/
+dist/
+scripts/private/
+*.bak-*/
+skill/.xireactor/
+.claude/projects/
+.claude/logs/
