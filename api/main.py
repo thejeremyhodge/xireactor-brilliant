@@ -1,12 +1,17 @@
 """xiReactor Brilliant API — FastAPI application entrypoint."""
 
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from psycopg import errors as pg_errors
 
 from database import init_pool, close_pool, get_pool
 from admin_bootstrap import ensure_admin_user
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -34,6 +39,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(pg_errors.InsufficientPrivilege)
+async def _rls_insufficient_privilege_handler(
+    request: Request, exc: pg_errors.InsufficientPrivilege
+) -> JSONResponse:
+    # RLS denied the operation. Surface as 403 instead of leaking 500.
+    # Log server-side so a Postgres-role misconfig (the rare non-authz cause)
+    # remains visible in the logs even though the wire response stays 403.
+    logger.info(
+        "RLS denied %s %s for client; returning 403", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=403,
+        content={"detail": "Your role does not permit this operation."},
+    )
+
+
+@app.exception_handler(pg_errors.CheckViolation)
+async def _rls_check_violation_handler(
+    request: Request, exc: pg_errors.CheckViolation
+) -> JSONResponse:
+    # RLS WITH CHECK predicate failed (typically writing past a sensitivity
+    # ceiling or to a resource the row-level policy disallows).
+    logger.info(
+        "RLS WITH CHECK denied %s %s; returning 403",
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(
+        status_code=403,
+        content={"detail": "This operation is not permitted by policy."},
+    )
 
 
 @app.get("/health")

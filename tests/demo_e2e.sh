@@ -290,10 +290,10 @@ call POST "/entries" "$VIEWER_KEY" -d '{
     "logical_path": "Demo/viewer-blocked",
     "sensitivity": "shared"
 }'
-if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "500" ]; then
-    pass "Viewer write blocked: HTTP $HTTP_CODE (RLS prevents INSERT)"
+if [ "$HTTP_CODE" = "403" ]; then
+    pass "Viewer write blocked: HTTP 403 (RLS denial surfaced correctly)"
 else
-    fail "Viewer write: expected 403 or 500 (RLS error), got $HTTP_CODE"
+    fail "Viewer write: expected 403, got $HTTP_CODE — 500 means an RLS exception is leaking unhandled (see api/main.py exception handlers)"
     echo "    Body: $BODY"
 fi
 
@@ -309,10 +309,10 @@ call POST "/entries" "$AGENT_KEY" -d '{
     "logical_path": "Demo/agent-blocked",
     "sensitivity": "shared"
 }'
-if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "500" ]; then
-    pass "Agent direct write blocked: HTTP $HTTP_CODE (RLS prevents INSERT)"
+if [ "$HTTP_CODE" = "403" ]; then
+    pass "Agent direct write blocked: HTTP 403 (route guard rejects agent keys)"
 else
-    fail "Agent direct write: expected 403 or 500 (RLS error), got $HTTP_CODE"
+    fail "Agent direct write: expected 403, got $HTTP_CODE"
     echo "    Body: $BODY"
 fi
 
