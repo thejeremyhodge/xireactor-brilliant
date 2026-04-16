@@ -70,6 +70,32 @@ chore: bump anthropic SDK to 0.40
 - Call out schema/migration changes explicitly — reviewers need to know
 - Include steps to test if not obvious from the diff
 
+## Prompt Requests (experimental)
+
+We're trying a second contribution path alongside pull requests: describe *what* you want as a GitHub Issue, and a maintainer (with AI-agent assistance) decides whether to execute it directly. No code, no fork, no merge — just intent.
+
+**How to file:**
+- Open an Issue with the label `type:prompt-request`.
+- Include: the change you want, *why* (use case / rationale), and acceptance criteria (how to verify it's done).
+
+**What a good prompt request looks like:**
+- Concrete scope — one feature, one fix, one refactor.
+- Acceptance criteria an agent or human can verify.
+- Rationale alongside the ask — "I want X because Y" is more useful than just "X".
+
+**What happens next:**
+- The maintainer evaluates the *intent*, not an implementation.
+- Executed prompts credit the prompter with a `Prompt-Request-By: @username` trailer in the commit body.
+- The maintainer may modify scope, ask for clarification, or decline with a brief rationale.
+
+**When a pull request is a better fit:**
+- You've reproduced a bug and have a specific fix in mind.
+- You want to write the code yourself and be credited as the author.
+- The change requires codebase-specific expertise that's hard to convey as a prompt.
+- You want visible commit authorship on your GitHub profile.
+
+Neither path is "better" in the abstract. Code PRs carry empirical verification a prompt can't; prompt requests lower the contribution barrier to zero. Use whichever fits the change you want to propose.
+
 ## Issues
 
 File issues at [github.com/thejeremyhodge/xireactor-brilliant/issues](https://github.com/thejeremyhodge/xireactor-brilliant/issues).
