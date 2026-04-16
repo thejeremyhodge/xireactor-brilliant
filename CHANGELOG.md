@@ -20,15 +20,24 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 - _nothing yet_
 
+## [0.2.2] — 2026-04-16
+
+### Added
+- `CODE_OF_CONDUCT.md` — Contributor Covenant v2.1
+- `SECURITY.md` — vulnerability disclosure policy
+- `CHANGELOG.md` — Keep-a-Changelog-compatible release history
+
+### Changed
+- `CONTRIBUTING.md` — added "For Maintainers" note and formalized doc-only → `main` merge path (bypasses `dev` release gate)
+- `.gitignore` — extended to cover private maintainer surfaces
+
+[Full notes](https://github.com/thejeremyhodge/xireactor-brilliant/releases/tag/v0.2.2)
+
 ## [0.2.1] — 2026-04-14
 
 ### Fixed
 - `tests/demo_e2e.sh` API contract drift
 - README tweaks
-
-### Documentation
-- Added "For Maintainers" note to `CONTRIBUTING.md`
-- Extended `.gitignore` to cover private maintainer surfaces
 
 [Full notes](https://github.com/thejeremyhodge/xireactor-brilliant/releases/tag/v0.2.1)
 
@@ -61,7 +70,8 @@ traversal via recursive CTEs, multi-tenant organizations with row-level security
 MCP integration for Claude Co-work and Claude Code (stdio + Streamable HTTP / OAuth 2.1),
 and Obsidian vault import with preview, collision detection, and batch rollback.
 
-[Unreleased]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/thejeremyhodge/xireactor-brilliant/releases/tag/v0.2.0
 [0.1.0]: https://github.com/thejeremyhodge/xireactor-brilliant/commit/6dcc794

@@ -12,9 +12,9 @@ This project uses a two-branch model:
 3. Make your change, commit, push.
 4. Open a pull request against `dev` (not `main`).
 
-**Releases:** Maintainers periodically merge `dev` → `main` and cut a tagged release. Tags follow semver (`v0.2.0`, `v0.3.0`, etc.).
+**Releases and `main`:** Code changes flow `dev` → `main` with a tagged release. Tags follow semver (`v0.2.0`, `v0.3.0`, etc.). Doc-only changes (markdown files, no code paths touched) may land directly on `main` at maintainer discretion — they don't need to wait for a release cut, since they can't affect runtime behavior.
 
-Don't PR against `main` directly unless it's a documentation-only fix or a critical hotfix.
+Don't PR against `main` directly unless your change is documentation-only or a critical hotfix.
 
 ## Dev Setup
 
