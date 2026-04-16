@@ -21,6 +21,7 @@ Thumbs.db
 
 # Docker
 pgdata/
+docker-compose.override.yml
 
 # Dev-only
 skill/*.zip
