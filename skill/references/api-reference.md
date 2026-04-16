@@ -1102,6 +1102,114 @@ curl -s "http://localhost:8010/import/batches?status=rolled_back" \
 
 ---
 
+### 16. Attachments
+
+Upload local files as content-addressed blobs, optionally digest PDFs into staged entries, and retrieve originals via short-lived signed URLs. Blobs are deduped per-org by sha256; cross-org uploads of identical content produce distinct blob rows (tenant isolation holds even with a shared storage backend).
+
+---
+
+#### 16a. Upload Attachment
+
+**`POST /attachments`**
+
+Accepts a multipart file upload. Hashes the bytes on the fly, dedupes against the caller's org, persists via the configured `Storage` backend (local FS or S3-compatible), and returns blob metadata.
+
+**Query parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `digest` | bool | false | When true **and** the effective content-type is `application/pdf`, extract text via `pypdf` and create a staged entry with `submission_category='attachment_digest'`. On approval, the entry is linked back to the blob via `entry_attachments(role='source')`. |
+| `content_type` | string | null | Explicit MIME override. Used when the uploading client can't set a proper multipart `Content-Type` (e.g. sends `application/octet-stream`). |
+
+**Request body:** multipart/form-data with a single `file` part.
+
+**Size cap:** 50 MiB per request by default; override via the `MAX_ATTACHMENT_BYTES` env var. Exceeding the cap returns **413**.
+
+```bash
+curl -s -X POST "http://localhost:8010/attachments?digest=true&content_type=application/pdf" \
+  -H "Authorization: Bearer bkai_adm1_testkey_admin" \
+  -F "file=@./fixture.pdf"
+```
+
+**Response (201):**
+
+```json
+{
+  "blob_id": "b1c2d3e4-...",
+  "sha256": "c0ffee...",
+  "dedup": false,
+  "size_bytes": 18421,
+  "content_type": "application/pdf",
+  "staging_id": "s1t2u3v4-..."
+}
+```
+
+`staging_id` is present only when `digest=true` and the effective content-type was `application/pdf`. Uploading identical bytes to the same org a second time returns the original `blob_id` with `dedup: true`. Uploading the same bytes to a different org produces a new `blob_id` (no cross-org dedup).
+
+---
+
+#### 16b. Get Attachment
+
+**`GET /attachments/{blob_id}`**
+
+Returns a **302** redirect to a time-limited signed URL (5-minute TTL) for the underlying blob. Authorization is enforced via entry RLS: the caller must have read access to at least one entry that references the blob through `entry_attachments`. Callers without visibility receive **404** (not 403) to avoid leaking blob existence.
+
+```bash
+curl -sI "http://localhost:8010/attachments/b1c2d3e4-..." \
+  -H "Authorization: Bearer bkai_adm1_testkey_admin"
+```
+
+**Response (302):** `Location: <signed URL>` — follow to fetch the bytes. Local-storage signed URLs point to `GET /attachments/_local/{key}?exp=...&sig=...` on the same host; S3-backed deployments return presigned S3 URLs.
+
+**Response (404):** Blob does not exist, or the caller has no read access to any entry referencing it.
+
+---
+
+#### 16c. List Entry Attachments
+
+**`GET /entries/{id}/attachments`**
+
+List blobs attached to an entry, ordered by `created_at`. RLS filters out attachments on entries the caller cannot see.
+
+```bash
+curl -s "http://localhost:8010/entries/e5f6g7h8-.../attachments" \
+  -H "Authorization: Bearer bkai_adm1_testkey_admin"
+```
+
+**Response (200):**
+
+```json
+{
+  "entry_id": "e5f6g7h8-...",
+  "attachments": [
+    {
+      "blob_id": "b1c2d3e4-...",
+      "sha256": "c0ffee...",
+      "content_type": "application/pdf",
+      "size_bytes": 18421,
+      "role": "source",
+      "created_at": "2026-04-16T12:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+#### 16d. MCP Tool: `upload_attachment`
+
+Exposed to co-work sessions via MCP. Reads a local file path, derives content-type from the extension when not supplied, and posts to `POST /attachments`.
+
+**Signature:** `upload_attachment(path: str, digest: bool = True, content_type: str | None = None) -> dict`
+
+- `path` — absolute path readable by the MCP server process. For Docker-hosted MCP, the file must live on a bind-mounted volume.
+- `digest` — defaults to `True`; triggers the PDF digest pipeline when the effective content-type is `application/pdf`.
+- `content_type` — explicit override; when omitted, derived via `mimetypes.guess_type(path)`, falling back to `application/octet-stream`.
+
+Returns the `POST /attachments` response verbatim (see 16a). Typical end-to-end flow: call `upload_attachment("/path/to.pdf")` → inspect `staging_id` → confirm via `list_staging` → approve via `review_staging` (or let batch processing promote it).
+
+---
+
 ## Valid Enumeration Values
 
 **Content types:** `context`, `project`, `meeting`, `decision`, `intelligence`, `daily`, `resource`, `department`, `team`, `system`, `onboarding`

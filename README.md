@@ -151,6 +151,7 @@ Brilliant ships with an MCP server (`mcp/`) and a Claude skill (`skill/`) for Cl
 | Row-level security (multi-tenant) | Shipped, single-org validated |
 | MCP integration (Claude Co-work / Claude Code) | Shipped |
 | Obsidian vault import | Shipped |
+| File attachments (PDF digest, S3-compatible storage, dedup by content hash) | Shipped — see [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md) |
 | Tier 3 AI reviewer (Anthropic) | Shipped, opt-in via ANTHROPIC_API_KEY |
 | KB-native review escalation | Shipped |
 | Concurrent writer stress test | 20–120 clients, ~178 ops/sec, 99.8%+ success, 0 data corruption (see below) |

@@ -61,6 +61,7 @@ _route_modules = [
     ("routes.groups", "groups_router", "/groups"),
     ("routes.comments", "entries_comments_router", "/entries"),
     ("routes.comments", "comments_router", "/comments"),
+    ("routes.attachments", "router", "/attachments"),
 ]
 
 for module_path, attr_name, prefix in _route_modules:

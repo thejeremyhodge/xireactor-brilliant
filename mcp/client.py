@@ -52,3 +52,39 @@ class CortexClient:
 
     async def delete(self, path: str, *, api_key: str | None = None) -> dict:
         return await self._request("DELETE", path, api_key=api_key)
+
+    async def post_multipart(
+        self,
+        path: str,
+        files: dict,
+        params: dict | None = None,
+        *,
+        api_key: str | None = None,
+    ) -> dict:
+        """POST a multipart/form-data request.
+
+        `files` follows httpx's convention:
+            {"file": (filename, bytes, content_type)}
+
+        The default ``Content-Type: application/json`` header from `_headers`
+        is stripped — httpx must set its own multipart boundary header.
+        """
+        url = f"{self.base_url}{path}"
+        headers = self._headers(api_key)
+        # Let httpx populate the multipart Content-Type (with boundary).
+        headers.pop("Content-Type", None)
+
+        async with httpx.AsyncClient(timeout=60) as http:
+            resp = await http.post(url, headers=headers, files=files, params=params)
+
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            return {"error": True, "status": resp.status_code, "detail": body}
+
+        if resp.status_code == 204:
+            return {"ok": True}
+
+        return resp.json()
