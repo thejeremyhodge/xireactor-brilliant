@@ -235,4 +235,85 @@ BEGIN
 END;
 $$;
 
+-- =============================================================================
+-- TEST 7: Observability tables — admin can read, viewer sees zero
+-- =============================================================================
+
+DO $$
+DECLARE
+    admin_visible INTEGER;
+    viewer_visible INTEGER;
+BEGIN
+    -- Admin seeds a row
+    SET LOCAL ROLE kb_admin;
+    SET LOCAL app.user_id = 'usr_admin';
+    SET LOCAL app.org_id = 'org_demo';
+    SET LOCAL app.role = 'admin';
+    SET LOCAL app.department = 'leadership';
+
+    INSERT INTO entry_access_log (org_id, actor_type, actor_id, entry_id, source)
+    VALUES ('org_demo', 'user', 'usr_admin',
+            'a0000000-0000-0000-0000-000000000001', 'web_ui');
+
+    SELECT count(*) INTO admin_visible FROM entry_access_log;
+    RESET ROLE;
+
+    -- Viewer must see 0 rows (no SELECT policy for non-admin)
+    SET LOCAL ROLE kb_viewer;
+    SET LOCAL app.user_id = 'usr_viewer';
+    SET LOCAL app.org_id = 'org_demo';
+    SET LOCAL app.role = 'viewer';
+    SET LOCAL app.department = '';
+
+    SELECT count(*) INTO viewer_visible FROM entry_access_log;
+    RESET ROLE;
+
+    IF admin_visible >= 1 AND viewer_visible = 0 THEN
+        RAISE NOTICE 'PASS: entry_access_log RLS — admin sees %, viewer sees %', admin_visible, viewer_visible;
+    ELSE
+        RAISE NOTICE 'FAIL: entry_access_log RLS — admin sees %, viewer sees % (expected admin>=1, viewer=0)', admin_visible, viewer_visible;
+    END IF;
+
+    -- Clean up (as table owner — tables are append-only for kb roles)
+    DELETE FROM entry_access_log WHERE actor_id = 'usr_admin';
+END;
+$$;
+
+DO $$
+DECLARE
+    admin_visible INTEGER;
+    viewer_visible INTEGER;
+BEGIN
+    SET LOCAL ROLE kb_admin;
+    SET LOCAL app.user_id = 'usr_admin';
+    SET LOCAL app.org_id = 'org_demo';
+    SET LOCAL app.role = 'admin';
+    SET LOCAL app.department = 'leadership';
+
+    INSERT INTO request_log (org_id, actor_id, endpoint, method, status,
+                              response_bytes, approx_tokens, duration_ms)
+    VALUES ('org_demo', 'usr_admin', '/entries', 'GET', 200, 1024, 256, 12);
+
+    SELECT count(*) INTO admin_visible FROM request_log;
+    RESET ROLE;
+
+    SET LOCAL ROLE kb_viewer;
+    SET LOCAL app.user_id = 'usr_viewer';
+    SET LOCAL app.org_id = 'org_demo';
+    SET LOCAL app.role = 'viewer';
+    SET LOCAL app.department = '';
+
+    SELECT count(*) INTO viewer_visible FROM request_log;
+    RESET ROLE;
+
+    IF admin_visible >= 1 AND viewer_visible = 0 THEN
+        RAISE NOTICE 'PASS: request_log RLS — admin sees %, viewer sees %', admin_visible, viewer_visible;
+    ELSE
+        RAISE NOTICE 'FAIL: request_log RLS — admin sees %, viewer sees % (expected admin>=1, viewer=0)', admin_visible, viewer_visible;
+    END IF;
+
+    DELETE FROM request_log WHERE actor_id = 'usr_admin';
+END;
+$$;
+
 DO $$ BEGIN RAISE NOTICE '--- All validation tests complete ---'; END; $$;

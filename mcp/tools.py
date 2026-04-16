@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from mcp.server.fastmcp import FastMCP
 
 from client import CortexClient
@@ -471,3 +473,103 @@ def register_tools(mcp: FastMCP, api: CortexClient) -> None:
         to roll back. Cannot roll back an already rolled-back batch (returns 409).
         """
         return await api.delete(f"/import/{batch_id}")
+
+    # -------------------------------------------------------------------
+    # Analytics tools (admin-only)
+    # -------------------------------------------------------------------
+
+    def _coerce_admin_error(result: dict) -> dict:
+        """Convert a raw 403 CortexClient error dict into the documented shape.
+
+        CortexClient returns {"error": True, "status": 403, "detail": ...} on
+        HTTP 4xx/5xx. For admin-only endpoints we surface a friendlier
+        {"error": "admin-only", "detail": ...} so non-admin callers never see
+        a raw exception or a generic error envelope.
+        """
+        if isinstance(result, dict) and result.get("error") is True and result.get("status") == 403:
+            return {"error": "admin-only", "detail": result.get("detail")}
+        return result
+
+    @mcp.tool()
+    async def get_usage_stats(
+        kind: str = "top-entries",
+        since: str = "24h",
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Usage analytics rollups for admins.
+
+        Wraps the /analytics/* endpoints and returns consolidated JSON for the
+        calling admin's org. Non-admin callers receive
+        {"error": "admin-only", "detail": ...} — never a raised exception and
+        never a raw 500.
+
+        kind:
+          - "top-entries"     — most-read entries in the window
+          - "top-endpoints"   — most-hit endpoints with latency stats
+          - "session-depth"   — session breakdown for a specific actor_id
+          - "summary"         — returns all three at once (single response)
+
+        since: "1h" | "24h" | "7d" | "30d" (default "24h")
+
+        actor_type: optional filter for top-entries — "user" | "agent" | "api".
+        actor_id: required for "session-depth" (and "summary" when you want
+          per-actor session data — omit to skip).
+        limit: page size for top-entries and top-endpoints (default 20).
+
+        Admin-only — non-admin callers get {"error": "admin-only", ...}.
+        """
+        if kind == "top-entries":
+            params: dict = {"since": since, "limit": limit}
+            if actor_type is not None:
+                params["actor_type"] = actor_type
+            return _coerce_admin_error(await api.get("/analytics/top-entries", params=params))
+
+        if kind == "top-endpoints":
+            params = {"since": since, "limit": limit}
+            return _coerce_admin_error(await api.get("/analytics/top-endpoints", params=params))
+
+        if kind == "session-depth":
+            params = {"since": since}
+            if actor_id is not None:
+                params["actor_id"] = actor_id
+            return _coerce_admin_error(await api.get("/analytics/session-depth", params=params))
+
+        if kind == "summary":
+            top_entries_params: dict = {"since": since, "limit": limit}
+            if actor_type is not None:
+                top_entries_params["actor_type"] = actor_type
+            top_endpoints_params: dict = {"since": since, "limit": limit}
+            session_depth_params: dict = {"since": since}
+            if actor_id is not None:
+                session_depth_params["actor_id"] = actor_id
+
+            top_entries, top_endpoints, session_depth = await asyncio.gather(
+                api.get("/analytics/top-entries", params=top_entries_params),
+                api.get("/analytics/top-endpoints", params=top_endpoints_params),
+                api.get("/analytics/session-depth", params=session_depth_params),
+            )
+
+            # If any sub-call returned 403 (admin-only), surface the same
+            # admin-only envelope so the whole summary call fails clearly
+            # rather than returning a half-populated dict.
+            for sub in (top_entries, top_endpoints, session_depth):
+                if (
+                    isinstance(sub, dict)
+                    and sub.get("error") is True
+                    and sub.get("status") == 403
+                ):
+                    return {"error": "admin-only", "detail": sub.get("detail")}
+
+            return {
+                "top_entries": top_entries,
+                "top_endpoints": top_endpoints,
+                "session_depth": session_depth,
+            }
+
+        return {
+            "error": "invalid-kind",
+            "detail": f"unknown kind {kind!r} — expected one of: "
+                      "top-entries, top-endpoints, session-depth, summary",
+        }

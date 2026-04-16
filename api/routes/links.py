@@ -14,6 +14,7 @@ from models import (
     TraversalResponse,
     VALID_LINK_TYPES,
 )
+from services.access_log import log_entry_reads
 
 router = APIRouter(tags=["links"])
 
@@ -203,6 +204,13 @@ async def get_links(
             )
             for row in rows
         ]
+
+        # Observability: log the center entry + each neighbor in one batched INSERT.
+        await log_entry_reads(
+            conn,
+            user,
+            [entry_id, *(n.entry_id for n in neighbors)],
+        )
 
         return TraversalResponse(
             origin_id=entry_id,

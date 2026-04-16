@@ -153,6 +153,7 @@ Brilliant ships with an MCP server (`mcp/`) and a Claude skill (`skill/`) for Cl
 | Obsidian vault import | Shipped |
 | Tier 3 AI reviewer (Anthropic) | Shipped, opt-in via ANTHROPIC_API_KEY |
 | KB-native review escalation | Shipped |
+| Observability + MCP usage analytics | Shipped in v0.3.0 — see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) |
 | Concurrent writer stress test | 20–120 clients, ~178 ops/sec, 99.8%+ success, 0 data corruption (see below) |
 | Production Docker compose | Dev only — bring your own reverse proxy |
 | Web frontend | Planned (separate repo) |
