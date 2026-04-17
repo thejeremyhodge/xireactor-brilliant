@@ -218,6 +218,14 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
         effective_content = staging["proposed_content"] or current["content"]
         content_hash = hashlib.sha256(effective_content.encode()).hexdigest()
 
+        # Only override structural fields that were EXPLICITLY provided in
+        # proposed_meta. Using the defaulted locals (content_type defaults
+        # to "context", sensitivity to "shared") would silently rewrite
+        # fields on every meta-only update (e.g. a tag-only edit would
+        # reset content_type to "context"). See issue #12.
+        explicit_content_type = meta.get("content_type") if meta else None
+        explicit_sensitivity = meta.get("sensitivity") if meta else None
+
         await conn.execute(
             """
             UPDATE entries
@@ -238,9 +246,9 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 staging["proposed_title"],
                 effective_content,
                 content_hash,
-                content_type if meta else None,
+                explicit_content_type,
                 staging["target_path"],
-                sensitivity if meta else None,
+                explicit_sensitivity,
                 tags if tags else None,
                 json.dumps(domain_meta) if domain_meta else None,
                 new_version,
@@ -419,6 +427,23 @@ async def submit_staging(
             detail=f"proposed_content is required for {body.change_type} changes",
         )
 
+    # For updates: at least one of proposed_content / proposed_title /
+    # proposed_meta / content_type must be supplied — otherwise there is
+    # nothing to apply (issue #12).
+    if body.change_type == "update":
+        has_content = body.proposed_content is not None
+        has_title = body.proposed_title is not None
+        has_meta = bool(body.proposed_meta)
+        has_ct = body.content_type is not None
+        if not (has_content or has_title or has_meta or has_ct):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "update requires at least one of proposed_content, "
+                    "proposed_title, proposed_meta, or content_type"
+                ),
+            )
+
     # content_type is required for create changes
     if body.change_type == "create" and not body.content_type:
         # Check proposed_meta fallback
@@ -447,9 +472,15 @@ async def submit_staging(
         role=user.role,
     )
 
-    content_hash = hashlib.sha256(
-        (body.proposed_content or "").encode()
-    ).hexdigest()
+    # For metadata-only updates (no proposed_content), leave content_hash
+    # NULL rather than hashing an empty string — otherwise every such
+    # submission shares sha256("") and would falsely collide in the
+    # Tier 2 duplicate-content check below.
+    content_hash = (
+        hashlib.sha256(body.proposed_content.encode()).hexdigest()
+        if body.proposed_content is not None
+        else None
+    )
 
     async with get_db(user) as conn:
         # Validate content_type against registry at submission time (not just promotion)
@@ -519,14 +550,18 @@ async def submit_staging(
 
             # Tier 2 additional conflict checks
             if governance_tier == 2:
-                # Check for duplicate content hash in entries
-                cur3 = await conn.execute(
-                    "SELECT id FROM entries WHERE content_hash = %s AND org_id = %s LIMIT 1",
-                    (content_hash, user.org_id),
-                )
-                dup = await cur3.fetchone()
-                if dup:
-                    escalation_reasons.append(f"Duplicate content_hash — matches entry {dup[0]}")
+                # Check for duplicate content hash in entries — only when
+                # we actually have a hash. Metadata-only updates (no
+                # proposed_content) skip this check; otherwise every such
+                # submission would collide on sha256("").
+                if content_hash is not None:
+                    cur3 = await conn.execute(
+                        "SELECT id FROM entries WHERE content_hash = %s AND org_id = %s LIMIT 1",
+                        (content_hash, user.org_id),
+                    )
+                    dup = await cur3.fetchone()
+                    if dup:
+                        escalation_reasons.append(f"Duplicate content_hash — matches entry {dup[0]}")
 
                 # Check for other pending items targeting the same entry
                 if body.target_entry_id:
@@ -721,14 +756,17 @@ async def process_staging(
                 issues.append(f"Invalid content_type '{proposed_type}'")
 
             # --- Check 2: Duplicate detection (content_hash) ---
-            cur = await conn.execute(
-                "SELECT id FROM entries WHERE content_hash = %s AND org_id = %s LIMIT 1",
-                (item["content_hash"], item["org_id"]),
-            )
-            dup = await cur.fetchone()
-            if dup:
-                issues.append(f"Duplicate content_hash — matches entry {dup[0]}")
-                action = "deferred"
+            # Skip for metadata-only items where content_hash is NULL
+            # (no body content to dedupe on).
+            if item["content_hash"] is not None:
+                cur = await conn.execute(
+                    "SELECT id FROM entries WHERE content_hash = %s AND org_id = %s LIMIT 1",
+                    (item["content_hash"], item["org_id"]),
+                )
+                dup = await cur.fetchone()
+                if dup:
+                    issues.append(f"Duplicate content_hash — matches entry {dup[0]}")
+                    action = "deferred"
 
             # --- Check 3: Conflict detection (same target_entry_id, multiple pending) ---
             if item["target_entry_id"] and str(item["target_entry_id"]) in conflicting_targets:
