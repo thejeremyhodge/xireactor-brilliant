@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -473,6 +475,84 @@ def register_tools(mcp: FastMCP, api: CortexClient) -> None:
         to roll back. Cannot roll back an already rolled-back batch (returns 409).
         """
         return await api.delete(f"/import/{batch_id}")
+
+    # -------------------------------------------------------------------
+    # Attachment tools
+    # -------------------------------------------------------------------
+
+    @mcp.tool()
+    async def upload_attachment(
+        path: str,
+        digest: bool = True,
+        content_type: str | None = None,
+    ) -> dict:
+        """Upload a local file to Brilliant and optionally digest it into a staged entry.
+
+        Streams the file at `path` to `POST /attachments` as multipart and
+        returns the JSON response. When `digest=True` and the effective
+        content type is `application/pdf`, the server extracts text via
+        pypdf and creates a staged entry (visible via `list_staging`) that,
+        on approval, links back to the stored blob via `entry_attachments`.
+
+        Parameters:
+          path          — absolute path to a local file. The MCP server
+                          process must be able to read the file directly
+                          (`open(path, 'rb')`), which for Docker-hosted
+                          MCP means the file must live on a bind-mounted
+                          volume. Relative paths are resolved against the
+                          MCP server's working directory.
+          digest        — when True and content_type resolves to
+                          `application/pdf`, the upload triggers the PDF
+                          digest pipeline. Ignored for non-PDF uploads.
+          content_type  — explicit MIME override. If None, the type is
+                          derived from the file extension via
+                          `mimetypes.guess_type`, falling back to
+                          `application/octet-stream`.
+
+        Returns the server's JSON verbatim. For successful uploads:
+          {
+            "blob_id": "<uuid>",
+            "sha256": "<hex>",
+            "dedup": <bool>,
+            "size_bytes": <int>,
+            "content_type": "<mime>",
+            "staging_id": "<uuid>"   # only when digest=True and PDF
+          }
+
+        Uploading identical bytes twice within the same org returns
+        `dedup: true` with the original blob_id.
+        """
+        file_path = Path(path)
+        if not file_path.is_file():
+            return {
+                "error": True,
+                "status": 400,
+                "detail": f"File not found or not a regular file: {path}",
+            }
+
+        effective_ct = content_type
+        if effective_ct is None:
+            guessed, _ = mimetypes.guess_type(file_path.name)
+            effective_ct = guessed or "application/octet-stream"
+
+        try:
+            data = file_path.read_bytes()
+        except OSError as exc:
+            return {
+                "error": True,
+                "status": 400,
+                "detail": f"Could not read {path}: {exc}",
+            }
+
+        files = {"file": (file_path.name, data, effective_ct)}
+        params: dict = {"digest": "true" if digest else "false"}
+        # The endpoint uses the `content_type` query param as an override
+        # applied on top of the multipart part's own content-type. Pass
+        # through whatever we resolved so the server's effective type
+        # matches what we sent.
+        params["content_type"] = effective_ct
+
+        return await api.post_multipart("/attachments", files=files, params=params)
 
     # -------------------------------------------------------------------
     # Analytics tools (admin-only)

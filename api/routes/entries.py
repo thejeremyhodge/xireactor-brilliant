@@ -9,6 +9,8 @@ from psycopg.rows import dict_row
 from auth import UserContext, get_current_user
 from database import get_db
 from models import (
+    AttachmentResponse,
+    BlobResponse,
     EntryAppend,
     EntryCreate,
     EntryList,
@@ -537,3 +539,58 @@ async def delete_entry(
             raise HTTPException(status_code=404, detail="Entry not found")
 
         return {"message": "Entry archived"}
+
+
+@router.get("/{entry_id}/attachments", response_model=list[AttachmentResponse])
+async def list_entry_attachments(
+    entry_id: str,
+    user: UserContext = Depends(get_current_user),
+):
+    """List attachments on an entry, filtered by RLS.
+
+    Entry visibility is enforced by the entries RLS policies; the
+    `entry_attachments_select_via_entry` policy further hides attachment
+    rows whose owning entry the caller can't see. A caller with no access
+    to the entry will get an empty list — the same shape as an entry with
+    no attachments, which keeps cross-org probing quiet.
+    """
+    async with get_db(user) as conn:
+        cur = await conn.execute(
+            """
+            SELECT
+                ea.id            AS attachment_id,
+                ea.entry_id      AS entry_id,
+                ea.blob_id       AS blob_id,
+                ea.role          AS role,
+                ea.created_at    AS attachment_created_at,
+                b.sha256         AS sha256,
+                b.content_type   AS content_type,
+                b.size_bytes     AS size_bytes,
+                b.uploaded_at    AS uploaded_at
+            FROM entry_attachments ea
+            JOIN blobs b ON b.id = ea.blob_id
+            WHERE ea.entry_id = %s
+            ORDER BY ea.created_at ASC
+            """,
+            (entry_id,),
+        )
+        cur.row_factory = dict_row
+        rows = await cur.fetchall()
+
+    return [
+        AttachmentResponse(
+            id=str(r["attachment_id"]),
+            entry_id=str(r["entry_id"]),
+            blob_id=str(r["blob_id"]),
+            role=r["role"],
+            created_at=r["attachment_created_at"],
+            blob=BlobResponse(
+                id=str(r["blob_id"]),
+                sha256=r["sha256"],
+                content_type=r["content_type"],
+                size_bytes=int(r["size_bytes"]),
+                uploaded_at=r["uploaded_at"],
+            ),
+        )
+        for r in rows
+    ]

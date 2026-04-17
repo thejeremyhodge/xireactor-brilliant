@@ -153,6 +153,7 @@ Use the returned `api_key` value as your Bearer token. (Login issues a fresh API
 | Row-level security (multi-tenant) | Shipped, single-org validated |
 | MCP integration (Claude Co-work / Claude Code) | Shipped |
 | Obsidian vault import | Shipped |
+| File attachments (PDF digest, S3-compatible storage, dedup by content hash) | Shipped — see [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md) |
 | Tier 3 AI reviewer (Anthropic) | Shipped, opt-in via ANTHROPIC_API_KEY |
 | KB-native review escalation | Shipped |
 | Observability + MCP usage analytics | Shipped in v0.3.0 — see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) |

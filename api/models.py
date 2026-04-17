@@ -573,3 +573,35 @@ class CommentResponse(BaseModel):
     created_at: datetime
     resolved_at: datetime | None
     resolved_by: str | None
+
+
+# =============================================================================
+# Attachment models (spec 0034b — file uploads / PDF digest)
+# =============================================================================
+
+
+VALID_ATTACHMENT_ROLES = {"source", "derived", "thumbnail"}
+
+
+class BlobResponse(BaseModel):
+    """Content-addressed blob metadata. Storage backend + key are intentionally
+    omitted from the public API response — consumers use signed URLs via the
+    GET /attachments/{blob_id} endpoint to retrieve bytes.
+    """
+
+    id: str
+    sha256: str
+    content_type: str
+    size_bytes: int
+    uploaded_at: datetime
+
+
+class AttachmentResponse(BaseModel):
+    """An entry_attachments row plus the embedded blob record."""
+
+    id: str
+    entry_id: str
+    blob_id: str
+    role: str  # source | derived | thumbnail
+    created_at: datetime
+    blob: BlobResponse | None = None

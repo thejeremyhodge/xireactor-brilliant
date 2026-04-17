@@ -196,6 +196,27 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 "evaluator_approved",
             ),
         )
+
+        # Attachment-digest hook (T-0183): when the staging row came from
+        # the PDF digest pipeline, the blob is already persisted; link it
+        # to the newly-created entry via entry_attachments(role='source').
+        # The caller (submit_staging / process_staging / approve_staging)
+        # has already escalated to kb_admin before calling us, so the
+        # INSERT bypasses the kb_agent/kb_editor WITH CHECK clause and
+        # still carries proper org_id.
+        if staging.get("submission_category") == "attachment_digest":
+            blob_id = (meta or {}).get("blob_id")
+            if blob_id:
+                await conn.execute(
+                    """
+                    INSERT INTO entry_attachments (
+                        org_id, entry_id, blob_id, role
+                    ) VALUES (%s, %s, %s, 'source')
+                    ON CONFLICT (entry_id, blob_id) DO NOTHING
+                    """,
+                    (staging["org_id"], entry_row["id"], blob_id),
+                )
+
         return entry_row
 
     elif staging["change_type"] == "update":
