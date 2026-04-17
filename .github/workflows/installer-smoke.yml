@@ -1,0 +1,39 @@
+name: Installer smoke test
+
+on:
+  push:
+    branches:
+      - dev
+      - feat/installer
+  pull_request:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint install.sh
+        run: shellcheck install.sh
+
+      - name: Lint tests/test_installer.sh
+        run: shellcheck tests/test_installer.sh
+
+      - name: Run installer smoke test
+        env:
+          TEST_INSTALLER_ALLOW_DESTROY: "1"
+        run: bash tests/test_installer.sh --host
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose logs --tail 200 || true

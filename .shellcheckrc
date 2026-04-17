@@ -1,0 +1,3 @@
+# shellcheck config for xiReactor Brilliant
+# SC1091 — we don't source external files in install.sh or test scripts.
+disable=SC1091

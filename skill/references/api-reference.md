@@ -1373,3 +1373,46 @@ The response's `content` field is now rendered, not raw:
 - Frontmatter (`---\n…\n---` block, with or without a surrounding ```` ```yaml ```` fence) is stripped.
 - `[[wiki-links]]` are resolved to markdown links of the form `[Label](/kb/<uuid>)`. Unresolved wiki-links pass through literally.
 - The unrendered body is still available via the raw version endpoints; routine reads should use the rendered form.
+
+---
+
+## MCP Tools — Analytics
+
+### get_usage_stats
+
+Usage analytics rollups for admins. Wraps the three `GET /analytics/*` endpoints (added in spec 0034c) into a single MCP tool.
+
+**Admin-only.** Non-admin callers receive a structured dict `{"error": "admin-only", "detail": ...}` — never a raised exception and never a raw 500.
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `kind` | string | `"top-entries"` | One of: `top-entries`, `top-endpoints`, `session-depth`, `summary` |
+| `since` | string | `"24h"` | Window size. One of: `1h`, `24h`, `7d`, `30d` |
+| `actor_type` | string | null | Optional filter for `top-entries`: `user`, `agent`, or `api` |
+| `actor_id` | string | null | Required for `session-depth` to scope the breakdown to a single actor |
+| `limit` | int | 20 | Page size for `top-entries` and `top-endpoints` |
+
+**Kinds:**
+
+- **`top-entries`** — Proxies `GET /analytics/top-entries`. Returns `{ "items": [{"entry_id", "title", "reads"}], "limit", "offset", "since" }`.
+- **`top-endpoints`** — Proxies `GET /analytics/top-endpoints`. Returns `{ "items": [{"endpoint", "count", "avg_duration_ms", "p95_duration_ms"}], "limit", "offset", "since" }`.
+- **`session-depth`** — Proxies `GET /analytics/session-depth`. Returns `{ "actor_id", "windows": [{"window_start", "requests", "entries_touched", "duration_s"}], "since" }`.
+- **`summary`** — Fans out all three calls concurrently via `asyncio.gather` and returns `{ "top_entries": {...}, "top_endpoints": {...}, "session_depth": {...} }`. If any sub-call returns 403, the whole envelope collapses to `{"error": "admin-only", ...}`.
+
+**Error contract:**
+
+| Caller | Response |
+|---|---|
+| Admin | Rollup JSON as documented per kind |
+| Non-admin (viewer/editor/commenter/agent) | `{"error": "admin-only", "detail": ...}` |
+| Unknown `kind` value | `{"error": "invalid-kind", "detail": "unknown kind ..."}` |
+
+**Example — summary for the last week:**
+
+```python
+await get_usage_stats(kind="summary", since="7d", limit=10)
+```
+
+Returns the same structured envelope as three separate calls, in one round-trip.

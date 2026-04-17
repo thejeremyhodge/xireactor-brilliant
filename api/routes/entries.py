@@ -18,6 +18,7 @@ from models import (
     EntryUpdate,
     VALID_SENSITIVITIES,
 )
+from services.access_log import log_entry_reads
 from services.links import sync_entry_links
 from services.render import resolve_wiki_links
 
@@ -192,6 +193,9 @@ async def get_entry(
             row["content"], conn, str(row["id"])
         )
 
+        # Observability: record the read. Failure is swallowed inside helper.
+        await log_entry_reads(conn, user, [str(row["id"])])
+
         return _row_to_response(row)
 
 
@@ -263,6 +267,9 @@ async def list_entries(
         cur = await conn.execute(data_query, data_params)
         cur.row_factory = dict_row
         rows = await cur.fetchall()
+
+        # Observability: batched INSERT for every entry surfaced in this page.
+        await log_entry_reads(conn, user, [str(r["id"]) for r in rows])
 
         return EntryList(
             entries=[_row_to_response(r) for r in rows],

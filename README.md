@@ -20,107 +20,36 @@ Brilliant is designed for a single owner to build a core knowledge base first, t
 
 ## Getting Started
 
-Zero to first API call in under 10 minutes.
+Zero to working API in under 5 minutes.
 
-**Prerequisites:** Docker + Docker Compose. That's it.
+**Prerequisites:** a Mac or Linux box with `curl`. If Docker isn't installed, the installer will install it (pass `--no-install-docker` to opt out).
 
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/thejeremyhodge/xireactor-brilliant.git
-cd xireactor-brilliant
-cp .env.sample .env
-```
-
-Open `.env` in your editor. At minimum, set:
-
-- `ADMIN_EMAIL` — your email (used to log in via the API)
-- `ADMIN_PASSWORD` — a strong password (replaces the `change-me-before-first-run` placeholder)
-- `POSTGRES_PASSWORD` — change from the `dev` default if you care about isolation
-
-Optional:
-
-- `ANTHROPIC_API_KEY` — enables the Tier 3 AI reviewer for escalated staging items. If left blank, Tier 3 items fall through to human review (the default); everything else works fine.
-- `ADMIN_API_KEY` — if set, the admin bootstraps with this exact key. If unset, one is auto-generated on first startup and printed to the API logs (see step 3).
-
-### 2. Start the stack
+### One-liner install
 
 ```bash
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/thejeremyhodge/xireactor-brilliant/main/install.sh \
+  | bash -s -- --admin-email you@example.com
 ```
 
-Verify the API is up:
+The installer clones nothing — it runs against the repo you already cloned, or you can pipe it straight into bash to exercise the self-contained path. It prints an eight-phase plan, stands the stack up, and finishes with a summary banner containing your admin API key. The same key is written to `./brilliant-credentials.txt` (mode 600).
+
+Dry-run the plan first if you want to see what it will do:
 
 ```bash
-curl http://localhost:8010/health
-# {"status":"ok"}
+./install.sh --dry-run --admin-email you@example.com
 ```
 
-Postgres listens on `localhost:5442` if you want to inspect the database directly.
-
-### 3. Get your API key
-
-You have two paths depending on whether you want to run the smoke test or go straight to your own admin key.
-
-**Option A — Run the demo (fastest path to a working request)**
-
-The repo ships with seeded demo users and their API keys hardcoded in the end-to-end test. One command exercises the full flow — health check, auth, CRUD, governance, import, search — and leaves you with keys you can reuse:
+All flags:
 
 ```bash
-bash tests/demo_e2e.sh
+./install.sh --help
 ```
 
-The script targets `http://localhost:8010` by default. Override with `BASE_URL` if you run the stack on a different host or port — e.g. `BASE_URL=http://localhost:8020 bash tests/demo_e2e.sh`.
-
-The demo uses these seeded keys directly:
-
-- Admin: `bkai_adm1_testkey_admin`
-- Editor: `bkai_edit_testkey_editor`
-- Viewer: `bkai_view_testkey_viewer`
-- Agent: `bkai_agnt_testkey_agent`
-
-These are fine for local evaluation. Rotate them before exposing the API to anything you care about.
-
-**Option B — Log in as the admin you configured**
-
-On first startup, the API reads `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env` and creates the admin user. If you did not set `ADMIN_API_KEY`, an auto-generated key is printed once to the API logs with a distinctive banner:
+### First API call
 
 ```bash
-docker compose logs api | grep -A 3 "AUTO-GENERATED ADMIN API KEY"
-```
-
-If you missed the log (or restarted with an already-bootstrapped DB), mint a fresh session key by logging in:
-
-```bash
-curl -X POST http://localhost:8010/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"YOUR_ADMIN_PASSWORD"}'
-```
-
-Expected response:
-
-```json
-{
-  "api_key": "bkai_abcd_ef0123456789abcdef012345",
-  "user": {
-    "id": "usr_xr_admin",
-    "org_id": "org_demo",
-    "display_name": "xiReactor Admin",
-    "email": "admin@example.com",
-    "role": "admin",
-    "department": "leadership",
-    "is_active": true
-  }
-}
-```
-
-Use the `api_key` value as your Bearer token. (Note: login issues a fresh API key each time; older session keys remain valid until you revoke them.)
-
-### 4. Your first API call
-
-```bash
-curl http://localhost:8010/entries \
-  -H "Authorization: Bearer YOUR_API_KEY"
+curl -H "Authorization: Bearer $(cat ./brilliant-credentials.txt)" \
+  http://localhost:8010/entries
 ```
 
 Expected response shape:
@@ -138,9 +67,82 @@ Expected response shape:
 
 If you get `401`, the key is wrong. If you get `200` with an empty list, the seed data did not load — check `docker compose logs db`.
 
-### 5. Connect Claude (optional)
+### Demo seed (optional)
 
-Brilliant ships with an MCP server (`mcp/`) and a Claude skill (`skill/`) for Claude Co-work and Claude Code. The MCP server is already running on `localhost:8011` after `docker compose up -d`. See `skill/SKILL.md` for the skill definition and `mcp/README.md` for remote-deployment notes.
+The repo ships with seeded demo users and their API keys hardcoded in the end-to-end test. One command exercises the full flow — health check, auth, CRUD, governance, import, search — and leaves you with keys you can reuse:
+
+```bash
+bash tests/demo_e2e.sh
+```
+
+The script targets `http://localhost:8010` by default. Override with `BASE_URL` if you run the stack on a different host or port.
+
+The demo uses these seeded keys directly:
+
+- Admin: `bkai_adm1_testkey_admin`
+- Editor: `bkai_edit_testkey_editor`
+- Viewer: `bkai_view_testkey_viewer`
+- Agent: `bkai_agnt_testkey_agent`
+
+These are fine for local evaluation. Rotate them before exposing the API to anything you care about.
+
+### Connect Claude (optional)
+
+Brilliant ships with an MCP server (`mcp/`) and a Claude skill (`skill/`) for Claude Co-work and Claude Code. The MCP server is already running on `localhost:8011` after the installer finishes. See `skill/SKILL.md` for the skill definition and `mcp/README.md` for remote-deployment notes.
+
+<details>
+<summary><strong>Manual install</strong> (without the one-liner)</summary>
+
+Prefer the one-liner unless you want to audit each step or are running on a host where automated Docker install isn't safe.
+
+**1. Clone and configure**
+
+```bash
+git clone https://github.com/thejeremyhodge/xireactor-brilliant.git
+cd xireactor-brilliant
+cp .env.sample .env
+```
+
+Open `.env` in your editor. At minimum, set:
+
+- `ADMIN_EMAIL` — your email (used to log in via the API)
+- `ADMIN_PASSWORD` — a strong password (replaces the `change-me-before-first-run` placeholder)
+- `POSTGRES_PASSWORD` — change from the `dev` default if you care about isolation
+
+Optional:
+
+- `ANTHROPIC_API_KEY` — enables the Tier 3 AI reviewer for escalated staging items. If left blank, Tier 3 items fall through to human review (the default); everything else works fine.
+- `ADMIN_API_KEY` — if set, the admin bootstraps with this exact key. If unset, one is auto-generated on first startup and printed to the API logs.
+
+**2. Start the stack**
+
+```bash
+docker compose up -d
+curl http://localhost:8010/health
+# {"status":"ok"}
+```
+
+Postgres listens on `localhost:5442` if you want to inspect the database directly.
+
+**3. Get your admin API key**
+
+If you did not set `ADMIN_API_KEY`, an auto-generated key is printed once to the API logs with a distinctive banner:
+
+```bash
+docker compose logs api | grep -A 3 "AUTO-GENERATED ADMIN API KEY"
+```
+
+If you missed the log (or restarted with an already-bootstrapped DB), mint a fresh session key by logging in:
+
+```bash
+curl -X POST http://localhost:8010/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"YOUR_ADMIN_PASSWORD"}'
+```
+
+Use the returned `api_key` value as your Bearer token. (Login issues a fresh API key each time; older session keys remain valid until you revoke them.)
+
+</details>
 
 ## Features
 
@@ -154,6 +156,7 @@ Brilliant ships with an MCP server (`mcp/`) and a Claude skill (`skill/`) for Cl
 | File attachments (PDF digest, S3-compatible storage, dedup by content hash) | Shipped — see [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md) |
 | Tier 3 AI reviewer (Anthropic) | Shipped, opt-in via ANTHROPIC_API_KEY |
 | KB-native review escalation | Shipped |
+| Observability + MCP usage analytics | Shipped in v0.3.0 — see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) |
 | Concurrent writer stress test | 20–120 clients, ~178 ops/sec, 99.8%+ success, 0 data corruption (see below) |
 | Production Docker compose | Dev only — bring your own reverse proxy |
 | Web frontend | Planned (separate repo) |

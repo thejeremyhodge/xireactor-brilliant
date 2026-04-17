@@ -1,4 +1,4 @@
--- 023_staging_attachment_digest.sql
+-- 025_staging_attachment_digest.sql
 -- Expand staging.submission_category CHECK constraint to include
 -- 'attachment_digest' so PDF digest uploads (spec 0034b, T-0183) can
 -- route through the normal Tier 1/2 staging flow.

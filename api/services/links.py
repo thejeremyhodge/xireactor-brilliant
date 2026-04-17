@@ -1,14 +1,23 @@
-"""Shared helper for populating `entry_links` from wiki-link references in entry content.
+"""Shared helper for populating `entry_links` from cross-entry references in entry content.
 
 Called from every write path (`create_entry`, `update_entry`, bulk
 `import_files`) so that the read-time resolver (`services/render.py::resolve_wiki_links`,
 spec 0028) has data to resolve. Before this existed, only the bulk importer
 populated `entry_links` and MCP/UI-authored entries rendered `[[...]]` literally.
 
+Two reference forms are extracted:
+
+- ``[[wiki-link]]`` — Obsidian-style wiki links (preferred for cross-entry refs).
+- ``[label](target)`` — standard markdown links, when ``target`` looks like an
+  internal reference (no scheme, not an anchor, not an absolute path, not an
+  image). External links (URLs / mailto / images / anchors) are skipped.
+
 Match strategy mirrors migration 021 + the original inlined logic in
 `import_files.py`: resolve by `LOWER(logical_path)` tail segment first (the
 form wiki-links use — `[[person-gareth-prenderson]]`), then fall back to
-full `LOWER(logical_path)` and `LOWER(title)`.
+full `LOWER(logical_path)` and `LOWER(title)`. Both reference forms use the
+same resolver and dedup against each other so a single target referenced as
+both ``[[foo]]`` and ``[Foo](foo)`` produces exactly one ``entry_links`` row.
 """
 
 from __future__ import annotations
@@ -16,6 +25,30 @@ from __future__ import annotations
 import re
 
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+# Capture the character preceding the `[` so we can reject image syntax
+# (`![alt](src)`). Group 1 is the leading char (or empty at string start),
+# group 2 is the link label, group 3 is the target.
+_MARKDOWN_LINK_RE = re.compile(r"(^|[^!])\[([^\]]+)\]\(([^)]+)\)")
+
+
+def _is_internal_md_target(target: str) -> bool:
+    """Return True if a markdown link target looks like an internal entry ref.
+
+    Skip URLs (anything containing `://` — http, https, mailto:, ftp, etc.),
+    in-page anchors (starting with `#`), and absolute filesystem/URL paths
+    (starting with `/`). Image syntax is filtered upstream by the regex
+    refusing to match when the preceding char is `!`.
+    """
+    if not target:
+        return False
+    t = target.strip()
+    if not t:
+        return False
+    if "://" in t:
+        return False
+    if t.startswith("#") or t.startswith("/"):
+        return False
+    return True
 
 
 async def sync_entry_links(
@@ -44,17 +77,24 @@ async def sync_entry_links(
         (entry_id_s,),
     )
 
-    if not content or "[[" not in content:
+    # Cheap sniff: bail only when neither reference form can possibly match.
+    if not content or ("[[" not in content and "](" not in content):
         return 0
 
-    targets = _WIKI_LINK_RE.findall(content)
-    if not targets:
+    wiki_targets = _WIKI_LINK_RE.findall(content)
+    md_targets = [
+        target
+        for _prev, _label, target in _MARKDOWN_LINK_RE.findall(content)
+        if _is_internal_md_target(target)
+    ]
+    if not wiki_targets and not md_targets:
         return 0
 
-    # Dedup while preserving order.
+    # Dedup across both forms while preserving order. Wiki links scan first
+    # (historical order) so a target referenced both ways resolves once.
     seen: set[str] = set()
     unique_targets: list[str] = []
-    for t in targets:
+    for t in (*wiki_targets, *md_targets):
         key = t.strip()
         if key and key.lower() not in seen:
             seen.add(key.lower())

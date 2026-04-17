@@ -112,6 +112,12 @@ async def get_current_user(request: Request) -> UserContext:
 
         source = _KEY_TYPE_TO_SOURCE.get(key_type, "api")
 
+        # Stash on request.state so downstream middleware (e.g. request_log)
+        # can read org and actor IDs after the handler returns. Safe to set
+        # even if no middleware reads them.
+        request.state.user_org_id = str(org_id)
+        request.state.user_id = str(user_id)
+
         return UserContext(
             id=str(user_id),
             org_id=str(org_id),

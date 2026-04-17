@@ -15,7 +15,7 @@ Prerequisites
 -------------
   1. ``docker compose up -d``  (API on :8020 in this worktree)
   2. ``pip install -r tests/requirements-dev.txt``
-  3. Migrations applied through 023 (staging_attachment_digest).
+  3. Migrations applied through 025 (staging_attachment_digest).
 
 Run
 ---

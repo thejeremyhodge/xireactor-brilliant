@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_pool, close_pool, get_pool
 from admin_bootstrap import ensure_admin_user
+from middleware.request_log import RequestLogMiddleware
 
 
 @asynccontextmanager
@@ -35,6 +36,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request logger — added AFTER CORS so it becomes the outermost middleware
+# (Starlette prepends on add_middleware + reverses on build, so last-added
+# wraps everything). This lets us time the full stack including CORS + auth.
+app.add_middleware(RequestLogMiddleware)
+
 
 @app.get("/health")
 async def health():
@@ -62,6 +68,7 @@ _route_modules = [
     ("routes.comments", "entries_comments_router", "/entries"),
     ("routes.comments", "comments_router", "/comments"),
     ("routes.attachments", "router", "/attachments"),
+    ("routes.analytics", "router", "/analytics"),
 ]
 
 for module_path, attr_name, prefix in _route_modules:
