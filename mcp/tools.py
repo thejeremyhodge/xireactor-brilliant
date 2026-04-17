@@ -8,10 +8,10 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from client import CortexClient
+from client import BrilliantClient
 
 
-def register_tools(mcp: FastMCP, api: CortexClient) -> None:
+def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
     """Register all 18 Brilliant tools on the given FastMCP server instance."""
 
     # -------------------------------------------------------------------
@@ -559,9 +559,9 @@ def register_tools(mcp: FastMCP, api: CortexClient) -> None:
     # -------------------------------------------------------------------
 
     def _coerce_admin_error(result: dict) -> dict:
-        """Convert a raw 403 CortexClient error dict into the documented shape.
+        """Convert a raw 403 BrilliantClient error dict into the documented shape.
 
-        CortexClient returns {"error": True, "status": 403, "detail": ...} on
+        BrilliantClient returns {"error": True, "status": 403, "detail": ...} on
         HTTP 4xx/5xx. For admin-only endpoints we surface a friendlier
         {"error": "admin-only", "detail": ...} so non-admin callers never see
         a raw exception or a generic error envelope.

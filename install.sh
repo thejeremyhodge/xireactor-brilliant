@@ -35,6 +35,7 @@ KEY_OUT="${DEFAULT_KEY_OUT}"
 FORCE=0
 NO_INSTALL_DOCKER=0
 DRY_RUN=0
+MIGRATE_FROM_CORTEX=0
 
 # ---------- logging ----------
 
@@ -99,6 +100,10 @@ Optional:
   --force                    Overwrite existing .env.
   --no-install-docker        Detect Docker only; fail if missing.
   --dry-run                  Print the 8-phase plan and exit 0.
+  --migrate-from-cortex      Upgrade a pre-rename cortex-* stack in place:
+                             rename the cortex DB to brilliant, tear down old
+                             containers, and bring up the renamed stack with
+                             the existing data volume preserved.
   -h, --help                 Show this message.
 
 Examples:
@@ -129,6 +134,7 @@ parse_flags() {
       --force)               FORCE=1; shift ;;
       --no-install-docker)   NO_INSTALL_DOCKER=1; shift ;;
       --dry-run)             DRY_RUN=1; shift ;;
+      --migrate-from-cortex) MIGRATE_FROM_CORTEX=1; shift ;;
       -h|--help)             print_help; exit 0 ;;
       *) die 64 "Unknown flag: $1 (try --help)" ;;
     esac
@@ -142,8 +148,8 @@ require_bash4() {
     die 65 "Not running under bash."
   fi
   local major="${BASH_VERSION%%.*}"
-  if [ "$major" -lt 4 ]; then
-    die 65 "bash 4+ required (got $BASH_VERSION). On macOS: 'brew install bash' and rerun."
+  if [ "$major" -lt 3 ]; then
+    die 65 "bash 3.2+ required (got $BASH_VERSION)."
   fi
 }
 
@@ -373,6 +379,143 @@ phase_summary() {
 BANNER
 }
 
+# ---------- migration: cortex → brilliant ----------
+
+container_running() {
+  # $1 container name. Returns 0 if running, non-zero otherwise.
+  local name="$1"
+  local state
+  state="$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
+  [ "$state" = "true" ]
+}
+
+run_cmd() {
+  # Print the command; execute only when DRY_RUN=0.
+  # Usage: run_cmd docker stop cortex-api
+  log "migrate" "\$ $*"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    "$@"
+  fi
+}
+
+phase_migrate_from_cortex() {
+  log "migrate" "upgrade path: cortex-* → brilliant-*"
+
+  # Step 1: detect. Three cases to disambiguate:
+  #   - cortex-db running                  → migrate
+  #   - brilliant-db running, no cortex-db → already migrated, exit 0
+  #   - neither running                    → nothing to migrate, exit 1
+  local has_cortex_db=0
+  local has_brilliant_db=0
+  if container_running cortex-db; then has_cortex_db=1; fi
+  if container_running brilliant-db; then has_brilliant_db=1; fi
+
+  if [ "$has_cortex_db" -eq 0 ] && [ "$has_brilliant_db" -eq 1 ]; then
+    log "migrate" "brilliant-db is already running and cortex-db is not — already migrated."
+    exit 0
+  fi
+  if [ "$has_cortex_db" -eq 0 ] && [ "$has_brilliant_db" -eq 0 ]; then
+    die 76 "neither cortex-db nor brilliant-db is running — nothing to migrate. Run ./install.sh for a fresh install."
+  fi
+  if [ "$has_cortex_db" -eq 0 ]; then
+    log "migrate" "no cortex-* stack detected; nothing to migrate"
+    exit 0
+  fi
+
+  log "migrate" "detected running cortex-db — proceeding with migration"
+
+  # Step 2: quiesce writers. Stop cortex-api and cortex-mcp if present so the
+  # ALTER DATABASE below doesn't trip on live connections. Ignore failures for
+  # containers that don't exist; surface them only if the rename later fails.
+  log "migrate" "step 2: stop cortex-api and cortex-mcp (quiesce writers)"
+  if container_running cortex-api; then
+    run_cmd docker stop cortex-api
+  else
+    log "migrate" "cortex-api not running — skipping stop"
+  fi
+  if container_running cortex-mcp; then
+    run_cmd docker stop cortex-mcp
+  else
+    log "migrate" "cortex-mcp not running — skipping stop"
+  fi
+
+  # Step 3: rename the database. Any live connection to the `cortex` DB will
+  # cause this to fail — we surface a clear error in that case.
+  log "migrate" "step 3: ALTER DATABASE cortex RENAME TO brilliant"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    if ! docker exec cortex-db psql -U postgres -c \
+        "ALTER DATABASE cortex RENAME TO brilliant" 2>&1 | tee -a "$LOG_FILE"; then
+      log "migrate" "rename failed — checking for lingering connections"
+      docker ps --filter "name=cortex-" --format '  still up: {{.Names}}' \
+        2>&1 | tee -a "$LOG_FILE" || true
+      die 77 "ALTER DATABASE cortex RENAME TO brilliant failed. See ${LOG_FILE}. Migration aborted before teardown; cortex-db is still intact."
+    fi
+  else
+    log "migrate" "\$ docker exec cortex-db psql -U postgres -c 'ALTER DATABASE cortex RENAME TO brilliant'"
+  fi
+
+  # Step 4: tear down old cortex containers. Remove by explicit name so we
+  # don't depend on a prior compose file being present on disk. The Postgres
+  # data volume (pgdata) is unaffected — the renamed `brilliant` database
+  # lives inside it and is mounted by brilliant-db in step 5.
+  log "migrate" "step 4: remove old cortex containers (data volume preserved)"
+  run_cmd docker rm -f cortex-db cortex-api cortex-mcp
+
+  # Step 5: bring up the renamed stack. docker-compose.yml on this branch
+  # already names the containers brilliant-*.
+  log "migrate" "step 5: docker compose up -d --build (brilliant-*)"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    docker compose up -d --build 2>&1 | tee -a "$LOG_FILE"
+  else
+    log "migrate" "\$ docker compose up -d --build"
+  fi
+
+  # Step 6: verify health + the renamed DB is visible.
+  log "migrate" "step 6: verify brilliant-api /health and brilliant DB exists"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    local waited=0
+    while [ "$waited" -lt "$HEALTH_TIMEOUT_SECONDS" ]; do
+      if curl -fsS "${API_URL}/health" >/dev/null 2>&1; then
+        log "migrate" "brilliant-api healthy at ${API_URL}"
+        break
+      fi
+      sleep "$POLL_INTERVAL_SECONDS"
+      waited=$((waited + POLL_INTERVAL_SECONDS))
+    done
+    if [ "$waited" -ge "$HEALTH_TIMEOUT_SECONDS" ]; then
+      docker compose logs api --tail 50 2>&1 | tee -a "$LOG_FILE" || true
+      die 78 "brilliant-api did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s after migration. See ${LOG_FILE}."
+    fi
+    if ! docker exec brilliant-db psql -U postgres -lqt | grep -q '\bbrilliant\b'; then
+      die 79 "brilliant database not found inside brilliant-db after migration. See ${LOG_FILE}."
+    fi
+    log "migrate" "brilliant database present in brilliant-db"
+  else
+    log "migrate" "\$ curl -fsS ${API_URL}/health  (poll up to ${HEALTH_TIMEOUT_SECONDS}s)"
+    log "migrate" "\$ docker exec brilliant-db psql -U postgres -lqt | grep brilliant"
+  fi
+
+  # Step 7: summary.
+  log "migrate" "step 7: summary"
+  cat <<MIGRATED
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Migrated cortex → brilliant. Data preserved.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  New containers: brilliant-db, brilliant-api, brilliant-mcp
+  Database:       brilliant (renamed from cortex, same data volume)
+  API:            ${API_URL}
+
+  Your existing .env values (POSTGRES_PASSWORD, ADMIN_*) are unchanged.
+  If you previously hard-coded POSTGRES_DB=cortex in .env, update it to
+  POSTGRES_DB=brilliant to match the renamed database.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MIGRATED
+}
+
 # ---------- dry-run plan ----------
 
 print_plan() {
@@ -407,8 +550,29 @@ PLAN
 main() {
   parse_flags "$@"
 
-  if [ -z "$ADMIN_EMAIL" ]; then
+  # --migrate-from-cortex is a dedicated upgrade path and does not require
+  # --admin-email — the admin user already exists in the preserved DB.
+  if [ "$MIGRATE_FROM_CORTEX" -eq 0 ] && [ -z "$ADMIN_EMAIL" ]; then
     die 64 "--admin-email is required (try --help)"
+  fi
+
+  if [ "$MIGRATE_FROM_CORTEX" -eq 1 ]; then
+    # Log file: fresh for a real run, left alone for --dry-run.
+    if [ "$DRY_RUN" -eq 0 ]; then
+      : >"$LOG_FILE"
+    fi
+    log "phase 0" "install.sh v${SCRIPT_VERSION} --migrate-from-cortex starting"
+    phase_preflight
+    # Docker must already be present to have a cortex-* stack at all; detect
+    # only. We don't want to install or restart Docker as part of migration.
+    if ! docker_present; then
+      die 80 "docker not available — cannot detect or migrate an existing cortex-* stack"
+    fi
+    if ! docker_compose_v2_present; then
+      die 73 "docker compose V2 not available. Upgrade Docker (>=20.10) and rerun."
+    fi
+    phase_migrate_from_cortex
+    exit 0
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then

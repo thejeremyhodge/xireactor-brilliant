@@ -16,8 +16,8 @@ Run:
   pytest tests/test_observability.py -v
 
 Env overrides (keep tests runnable from either worktree after merge):
-  CORTEX_BASE_URL  -- default http://localhost:8030
-  CORTEX_DB_DSN    -- default postgresql://postgres:dev@localhost:5462/cortex
+  BRILLIANT_BASE_URL  -- default http://localhost:8030
+  BRILLIANT_DB_DSN    -- default postgresql://postgres:dev@localhost:5462/brilliant
 """
 
 from __future__ import annotations
@@ -40,10 +40,10 @@ except ImportError:
 # 8010/:5442. Default to the observability ports so this file works without
 # env overrides when executed from this worktree, but allow override so the
 # same tests can run from the primary tree after merge.
-BASE_URL = os.environ.get("CORTEX_BASE_URL", "http://localhost:8030")
+BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8030")
 DB_DSN = os.environ.get(
-    "CORTEX_DB_DSN",
-    "postgresql://postgres:dev@localhost:5462/cortex",
+    "BRILLIANT_DB_DSN",
+    "postgresql://postgres:dev@localhost:5462/brilliant",
 )
 
 ADMIN_KEY = "bkai_adm1_testkey_admin"

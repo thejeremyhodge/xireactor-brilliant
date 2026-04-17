@@ -6,9 +6,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from client import CortexClient
+from client import BrilliantClient
 
-api = CortexClient()
+api = BrilliantClient()
 
 passed = 0
 failed = 0

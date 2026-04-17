@@ -27,10 +27,10 @@ except ImportError:
     _PSYCOPG_AVAILABLE = False
 
 
-BASE_URL = os.environ.get("CORTEX_BASE_URL", "http://localhost:8010")
+BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010")
 DB_DSN = os.environ.get(
-    "CORTEX_DB_DSN",
-    "postgresql://postgres:dev@localhost:5442/cortex",
+    "BRILLIANT_DB_DSN",
+    "postgresql://postgres:dev@localhost:5442/brilliant",
 )
 ADMIN_KEY = "bkai_adm1_testkey_admin"
 REQUEST_TIMEOUT = 10.0

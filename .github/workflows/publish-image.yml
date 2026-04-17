@@ -17,10 +17,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - image: cortex-api
+          - image: brilliant-api
             context: ./api
             dockerfile: ./api/Dockerfile
-          - image: cortex-mcp
+          - image: brilliant-mcp
             context: ./mcp
             dockerfile: ./mcp/Dockerfile
     steps:

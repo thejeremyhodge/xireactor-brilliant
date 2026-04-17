@@ -65,10 +65,10 @@ except ImportError:  # pragma: no cover
     _PSYCOPG_AVAILABLE = False
 
 
-BASE_URL = os.environ.get("CORTEX_BASE_URL", "http://localhost:8020")
+BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8020")
 DB_DSN = os.environ.get(
-    "CORTEX_DB_DSN",
-    "postgresql://postgres:dev@localhost:5452/cortex",
+    "BRILLIANT_DB_DSN",
+    "postgresql://postgres:dev@localhost:5452/brilliant",
 )
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "bkai_adm1_testkey_admin")
 

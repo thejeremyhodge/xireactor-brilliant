@@ -48,10 +48,10 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-BASE_URL = os.environ.get("CORTEX_BASE_URL", "http://localhost:8010")
+BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010")
 DB_DSN = os.environ.get(
-    "CORTEX_DB_DSN",
-    "postgresql://postgres:dev@localhost:5442/cortex",
+    "BRILLIANT_DB_DSN",
+    "postgresql://postgres:dev@localhost:5442/brilliant",
 )
 
 # Test API keys from db/migrations/005_seed.sql.

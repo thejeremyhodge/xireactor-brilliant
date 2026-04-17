@@ -22,13 +22,11 @@ uv pip install -r requirements.txt
 
 | Env Var | Default | Description |
 |---|---|---|
-| `CORTEX_BASE_URL` | `http://localhost:8010` | Brilliant API base URL |
-| `CORTEX_API_KEY` | *(required)* | Bearer token for API auth |
+| `BRILLIANT_BASE_URL` | `http://localhost:8010` | Brilliant API base URL |
+| `BRILLIANT_API_KEY` | *(required)* | Bearer token for API auth |
 | `MCP_BASE_URL` | `http://localhost:8011` | External URL for OAuth issuer (remote only) |
 | `MCP_PORT` | `8001` | Port for remote HTTP server |
 | `TOKEN_EXPIRY_SECONDS` | `3600` | OAuth access token lifetime |
-
-> Note: `CORTEX_BASE_URL` / `CORTEX_API_KEY` env var names are preserved as infrastructure identifiers across the Cortex→Brilliant rename. Deployments already using them don't need to change configuration.
 
 ## Claude Desktop Integration (Stdio)
 
@@ -42,7 +40,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "args": ["/absolute/path/to/xireactor-brilliant/mcp/server.py"],
       "env": {
         "PYTHONUNBUFFERED": "1",
-        "CORTEX_API_KEY": "bkai_adm1_testkey_admin"
+        "BRILLIANT_API_KEY": "bkai_adm1_testkey_admin"
       }
     }
   }
@@ -77,7 +75,7 @@ Restart Claude Desktop after editing the config. The 11 Brilliant tools will app
 
 2. Set the API key as an environment variable on the MCP container:
    ```bash
-   CORTEX_API_KEY=bkai_XXXX_your_org_key
+   BRILLIANT_API_KEY=bkai_XXXX_your_org_key
    ```
 
 3. Deploy via docker-compose (see below)
@@ -86,7 +84,7 @@ Restart Claude Desktop after editing the config. The 11 Brilliant tools will app
 
 ```bash
 # Set required env vars
-export CORTEX_API_KEY=bkai_XXXX_your_org_key
+export BRILLIANT_API_KEY=bkai_XXXX_your_org_key
 export MCP_BASE_URL=http://localhost:8011  # or your deployed URL
 
 # Start all services
@@ -192,7 +190,7 @@ your-domain.example.com {
 
 ```bash
 # Stdio transport (against live API)
-CORTEX_API_KEY=bkai_adm1_testkey_admin python test_tools.py
+BRILLIANT_API_KEY=bkai_adm1_testkey_admin python test_tools.py
 
 # Remote transport (start server first, or use docker-compose)
 MCP_TEST_URL=http://localhost:8011 python test_remote.py
