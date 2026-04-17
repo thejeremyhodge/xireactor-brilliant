@@ -19,11 +19,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.middleware.cors import CORSMiddleware
 
-from client import CortexClient
+from client import BrilliantClient
 from oauth_store import PgOAuthStore
 from tools import register_tools
 
-logger = logging.getLogger("cortex.auth")
+logger = logging.getLogger("brilliant.auth")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -31,7 +31,7 @@ logger = logging.getLogger("cortex.auth")
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "8001"))
 MCP_BASE_URL = os.environ.get("MCP_BASE_URL", "http://localhost:8011")
-CORTEX_API_KEY = os.environ.get("CORTEX_API_KEY", "")
+BRILLIANT_API_KEY = os.environ.get("BRILLIANT_API_KEY", "")
 TOKEN_EXPIRY_SECONDS = int(os.environ.get("TOKEN_EXPIRY_SECONDS", "3600"))
 
 
@@ -40,7 +40,7 @@ TOKEN_EXPIRY_SECONDS = int(os.environ.get("TOKEN_EXPIRY_SECONDS", "3600"))
 # ---------------------------------------------------------------------------
 
 
-class CortexOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
+class BrilliantOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
     """OAuth 2.1 provider for Claude Co-work integration.
 
     Supports Dynamic Client Registration (DCR) so Co-work can self-register,
@@ -55,7 +55,7 @@ class CortexOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         return await self.store.get_client(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        client_id = f"cortex_{secrets.token_hex(16)}"
+        client_id = f"brilliant_{secrets.token_hex(16)}"
         client_secret = secrets.token_hex(32)
         client_info.client_id = client_id
         client_info.client_secret = client_secret
@@ -185,10 +185,10 @@ class CortexOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
 # ---------------------------------------------------------------------------
 
 store = PgOAuthStore()
-provider = CortexOAuthProvider(store)
+provider = BrilliantOAuthProvider(store)
 
 mcp = FastMCP(
-    name="cortex",
+    name="brilliant",
     host="0.0.0.0",
     port=MCP_PORT,
     auth_server_provider=provider,
@@ -197,8 +197,8 @@ mcp = FastMCP(
         resource_server_url=MCP_BASE_URL,
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
-            valid_scopes=["cortex"],
-            default_scopes=["cortex"],
+            valid_scopes=["brilliant"],
+            default_scopes=["brilliant"],
         ),
         revocation_options=RevocationOptions(enabled=True),
         required_scopes=[],
@@ -210,7 +210,7 @@ mcp.settings.debug = False
 mcp._custom_starlette_routes = getattr(mcp, "_custom_starlette_routes", [])
 
 # Register all 11 Brilliant tools
-api = CortexClient()
+api = BrilliantClient()
 register_tools(mcp, api)
 
 

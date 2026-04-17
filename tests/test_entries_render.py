@@ -37,16 +37,16 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-BASE_URL = os.environ.get("CORTEX_BASE_URL", "http://localhost:8010")
+BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010")
 DB_DSN = os.environ.get(
-    "CORTEX_DB_DSN",
-    "postgresql://postgres:dev@localhost:5442/cortex",
+    "BRILLIANT_DB_DSN",
+    "postgresql://postgres:dev@localhost:5442/brilliant",
 )
 
 # Seed API key + user id (see db/migrations/005_seed.sql).
 ADMIN_KEY = "bkai_adm1_testkey_admin"
 USR_ADMIN = "usr_admin"
-ORG_ID = os.environ.get("CORTEX_TEST_ORG_ID", "org_demo")  # seeded org
+ORG_ID = os.environ.get("BRILLIANT_TEST_ORG_ID", "org_demo")  # seeded org
 
 REQUEST_TIMEOUT = 10.0
 

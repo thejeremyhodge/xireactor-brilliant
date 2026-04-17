@@ -15,7 +15,7 @@ import secrets
 
 import bcrypt
 
-logger = logging.getLogger("cortex.admin_bootstrap")
+logger = logging.getLogger("brilliant.admin_bootstrap")
 
 
 def _generate_api_key() -> str:

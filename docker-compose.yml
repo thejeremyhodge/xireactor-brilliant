@@ -1,25 +1,25 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    container_name: cortex-db
+    container_name: brilliant-db
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
-      POSTGRES_DB: ${POSTGRES_DB:-cortex}
+      POSTGRES_DB: ${POSTGRES_DB:-brilliant}
     ports:
       - "5442:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d cortex"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d brilliant"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   api:
     build: ./api
-    container_name: cortex-api
+    container_name: brilliant-api
     depends_on:
       db:
         condition: service_healthy
@@ -28,7 +28,7 @@ services:
     volumes:
       - ./api:/app
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-cortex}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-brilliant}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
@@ -37,7 +37,7 @@ services:
 
   mcp:
     build: ./mcp
-    container_name: cortex-mcp
+    container_name: brilliant-mcp
     depends_on:
       db:
         condition: service_healthy
@@ -48,11 +48,11 @@ services:
     volumes:
       - ./mcp:/app
     environment:
-      CORTEX_BASE_URL: http://api:8000
-      CORTEX_API_KEY: ${CORTEX_API_KEY:-}
+      BRILLIANT_BASE_URL: http://api:8000
+      BRILLIANT_API_KEY: ${BRILLIANT_API_KEY:-}
       MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
       MCP_PORT: "8001"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-cortex}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-brilliant}
     restart: unless-stopped
 
 volumes:

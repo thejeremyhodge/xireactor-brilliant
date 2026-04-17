@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:dev@localhost:5432/cortex",
+    "postgresql://postgres:dev@localhost:5432/brilliant",
 )
 
 _pool: AsyncConnectionPool | None = None

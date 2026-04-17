@@ -23,7 +23,7 @@ import pytest
 import requests
 
 
-BASE_URL = os.environ.get("CORTEX_BASE_URL", "http://localhost:8010")
+BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010")
 ADMIN_KEY = "bkai_adm1_testkey_admin"
 REQUEST_TIMEOUT = 10.0
 

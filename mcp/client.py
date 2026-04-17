@@ -5,12 +5,12 @@ import os
 import httpx
 
 
-class CortexClient:
+class BrilliantClient:
     """Async HTTP client for the Brilliant REST API."""
 
     def __init__(self):
-        self.base_url = os.environ.get("CORTEX_BASE_URL", "http://localhost:8010").rstrip("/")
-        self.api_key = os.environ.get("CORTEX_API_KEY", "")
+        self.base_url = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").rstrip("/")
+        self.api_key = os.environ.get("BRILLIANT_API_KEY", "")
 
     def _headers(self, api_key: str | None = None) -> dict[str, str]:
         """Build request headers, optionally overriding the default API key."""

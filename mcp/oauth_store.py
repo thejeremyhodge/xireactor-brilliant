@@ -13,11 +13,11 @@ from psycopg.rows import dict_row
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
 
-logger = logging.getLogger("cortex.oauth_store")
+logger = logging.getLogger("brilliant.oauth_store")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:dev@localhost:5432/cortex",
+    "postgresql://postgres:dev@localhost:5432/brilliant",
 )
 
 
