@@ -33,6 +33,10 @@ tests/concurrency_harness.py
 # Test/cache
 .pytest_cache/
 
+# Installer artifacts
+install.log
+brilliant-credentials.txt
+
 # ─── Private maintainer surfaces — never commit ───────────────
 # These paths are used locally for planning, marketing, research,
 # and video production. They must not land in the public repo.
