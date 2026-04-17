@@ -368,6 +368,17 @@ If the content type is ambiguous, check the type registry (loaded at session sta
 5. **Link to related entries** if relationships exist
 6. **Report** — entry title, path, and ID
 
+### Cross-Entry References in Content
+
+When entry content references another entry, two link forms are extracted on write and resolved on read into clickable references:
+
+- ``[[slug-or-title]]`` — Obsidian-style wiki link. **Preferred** — most compact, unambiguous, and matches the seeded vault convention.
+- ``[label](slug-or-title)`` — standard markdown link. Also extracted; use this when you want a custom display label or when the content is being authored in a markdown editor that doesn't speak wiki-link syntax.
+
+Both forms resolve via the same strategy (logical-path tail segment → full logical path → title) and dedup against each other, so writing `[[foo]]` and `[Foo](foo)` in the same entry produces exactly one outgoing link. URLs (`https://...`, `mailto:...`), in-page anchors (`#section`), absolute paths (`/path`), and image syntax (`![alt](src)`) are never extracted as entry references — link freely without worrying about false positives.
+
+Use `create_link` only when you need a typed link (`mentions`, `supersedes`, etc.) or when no plausible reference text fits inside the body — the in-body forms cover the common case.
+
 ### Bulk Ingestion
 
 For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), reach for `import_vault`:
