@@ -20,6 +20,56 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 - _nothing yet_
 
+## [0.3.0] — 2026-04-17 — Installer, attachments, observability, Brilliant rename
+
+> **Breaking:** container names, database name, OAuth scope, and `CORTEX_*` environment
+> variables were all renamed from `cortex` → `brilliant`. Existing installs upgrade via
+> `./install.sh --migrate-from-cortex`, which runs `ALTER DATABASE cortex RENAME TO brilliant`
+> on the existing `pgdata` volume and rebuilds containers under the new names — no data
+> copy. OAuth-connected clients (Claude Co-work) must re-authorize because the scope
+> changed from `cortex` to `brilliant`. Old `ghcr.io/thejeremyhodge/cortex-{api,mcp}` image
+> tags are frozen; new pushes go to `ghcr.io/thejeremyhodge/brilliant-{api,mcp}`.
+
+### Added
+- One-shot installer (`install.sh`) — Docker detection/install, strong random
+  `.env` generation, admin bootstrap, health-check polling, and an eight-phase plan
+  with `--dry-run`, `--no-install-docker`, and `--key-out` flags (spec 0034a)
+- `install.sh --migrate-from-cortex` — in-place upgrade path from a v0.2.x Cortex
+  install (rename database, rebuild containers, idempotent; exit codes 76–80)
+- File attachments — PDF digest pipeline, S3-compatible or local signed-URL storage,
+  content-hash dedup, `POST /attachments`, `GET /attachments/{id}`, MCP
+  `upload_attachment` tool (spec 0034b, issue #17, migrations 022 + 025)
+- Observability — async request-log middleware, per-entry read tracking, admin
+  `/analytics/*` rollup endpoints, MCP `get_usage_stats` tool
+  (spec 0034c, issue #15, migration 023)
+- `CHANGELOG.md` now covers the full v0.3.0 surface; see
+  [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md) and [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)
+  for the richer user-facing docs
+
+### Changed
+- **Cortex → Brilliant code-level rename** (spec 0035): `cortex-{db,api,mcp}` container
+  names → `brilliant-*`; default `POSTGRES_DB=cortex` → `brilliant`; FastMCP server
+  name + client class (`CortexClient` → `BrilliantClient`); `CortexOAuthProvider` →
+  `BrilliantOAuthProvider`; OAuth scope `cortex` → `brilliant`; GHCR image names
+  `cortex-{api,mcp}` → `brilliant-{api,mcp}`; environment variables
+  `CORTEX_BASE_URL` / `CORTEX_API_KEY` / `CORTEX_DB_DSN` / `CORTEX_TEST_ORG_ID` →
+  `BRILLIANT_*`
+- `session_init` / `SKILL.md` — corrected drift: `system_entries` carries
+  user-authored `System/*` entries only (rules, conventions); the content-type
+  registry lives in its own table and is fetched via `get_types`
+- README "Getting Started" rewritten around the one-shot installer with manual
+  `docker compose` path preserved as a collapsible section
+
+### Fixed
+- `sync_entry_links` now extracts markdown-style `[label](slug)` references in
+  addition to `[[wiki-links]]` so graph traversal stays consistent across authoring
+  styles (issue #16, migration 024 — staging content nullable)
+- `submit_staging` accepts proposed-meta-only updates (tags, sensitivity, etc.)
+  without requiring a content change; 422 no-op guard prevents empty submissions
+  (issue #12)
+
+[Full notes](https://github.com/thejeremyhodge/xireactor-brilliant/releases/tag/v0.3.0)
+
 ## [0.2.2] — 2026-04-16
 
 ### Added
@@ -70,7 +120,8 @@ traversal via recursive CTEs, multi-tenant organizations with row-level security
 MCP integration for Claude Co-work and Claude Code (stdio + Streamable HTTP / OAuth 2.1),
 and Obsidian vault import with preview, collision detection, and batch rollback.
 
-[Unreleased]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/thejeremyhodge/xireactor-brilliant/releases/tag/v0.2.0

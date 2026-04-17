@@ -127,7 +127,7 @@ At the beginning of every conversation, initialize your KB context:
 
 1. **Call `session_init`** — returns a pre-assembled context bundle:
    - Auto-scaled index depth (L4 for small KBs, L2 for large)
-   - System entries (type registry, rules, conventions)
+   - System entries — user-authored rules/conventions under `System/*` (may be empty on a fresh org). The content-type registry is served separately via `get_types`, not bundled here.
    - KB metadata (total entries, last updated, your role)
    - `pending_reviews` — `{ count, items[] (top 5 tier ≥ 3), review_url }`. **If `count > 0` on resume, surface this in the standup briefing unconditionally — the user should not have to ask.**
 
@@ -135,7 +135,7 @@ At the beginning of every conversation, initialize your KB context:
    - What topics the KB covers and how much content exists
    - Every document title and where it lives (at appropriate depth)
    - How documents relate to each other
-   - What content types are available (from the type registry system entries)
+   - What content types are available (query the registry with `get_types`)
 
 3. **Check your key type** from `metadata.user.source`:
    - If `agent`: all creates/updates go through `submit_staging`
@@ -357,7 +357,7 @@ Check your key type (from session start):
 
 When the user says "add this to the KB" without specifying where, use the content type routing table from [Preserve Knowledge](#preserve-knowledge) to pick the right `content_type` and `logical_path`.
 
-If the content type is ambiguous, check the type registry (loaded at session start from system entries) and pick the closest match. If truly unclear, ask.
+If the content type is ambiguous, call `get_types` to fetch the registry and pick the closest match. If truly unclear, ask.
 
 ### Steps
 
@@ -536,12 +536,12 @@ Beyond org-wide roles, admins and entry owners can grant per-entry or per-path a
 
 ## Content Type Awareness
 
-The type registry is loaded at session start as part of system entries. Use it to:
+The content-type registry lives in its own table and is fetched via `get_types` (it is NOT carried in `session_init.system_entries`). Use it to:
 
 1. **Validate content types** before creating entries — only use canonical types
 2. **Suggest types** when the user is unsure — show available types from the registry
 3. **Handle aliases** — if the user says "tasks" but the canonical type is "task", use the canonical name
-4. **Query the registry** anytime with `get_types` if you need a fresh list
+4. **Call `get_types`** to refresh the registry or if you didn't fetch it during session_init
 
 ---
 

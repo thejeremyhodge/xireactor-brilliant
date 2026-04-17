@@ -108,8 +108,14 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         """Initialize an agent session with a pre-assembled context bundle.
 
         Returns a dynamically-scoped index (depth chosen by KB size),
-        all system entries, metadata (total entries, last_updated,
-        user role summary), and pending_reviews.
+        any user-authored entries under System/* (rules, conventions,
+        org-wide agent behavior), metadata (total entries, last_updated,
+        user role summary), and pending_reviews. A fresh org with no
+        rules yet legitimately returns an empty system_entries array —
+        populate it by filing content_type=system entries under System/.
+
+        The content-type registry is NOT carried in system_entries —
+        it lives in its own table, queried via get_types.
 
         The pending_reviews section surfaces Tier 3+ governance items
         awaiting human review, scoped to the caller's organization:

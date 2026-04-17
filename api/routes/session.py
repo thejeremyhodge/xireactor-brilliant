@@ -109,7 +109,8 @@ async def session_init(
                 for r in links
             ]
 
-        # Always include system entries (type registry, rules, etc.)
+        # Always include user-authored system entries (rules, conventions under System/*).
+        # NOTE: the content-type registry is NOT here — it lives in its own table (see /types).
         cur = await conn.execute(
             """
             SELECT id, title, content, content_type, logical_path

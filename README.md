@@ -1,6 +1,6 @@
 # xiReactor Brilliant
 
-**v0.2.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+**v0.3.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
 
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent
@@ -196,13 +196,13 @@ Throughput stays flat as clients scale. Latency rises linearly (expected — sin
                                           │   PostgreSQL      │
                                           │   Row-Level       │
                                           │   Security (RLS)  │
-                                          │   21 migrations   │
+                                          │   25 migrations   │
                                           └───────────────────┘
 ```
 
 **Key components:**
 - **`api/`** — FastAPI backend with auth, entries, staging/governance, imports, links, permissions, comments, groups
-- **`db/migrations/`** — 21 SQL migrations (core schema through entry-link backfill)
+- **`db/migrations/`** — 25 SQL migrations (core schema through attachment digest + access-log analytics)
 - **`mcp/`** — MCP server wrapping the API for Claude Co-work (local + remote modes)
 - **`skill/`** — Claude Co-work skill definition + API reference
 - **`tools/vault_import.py`** — CLI helper for Obsidian vault import
