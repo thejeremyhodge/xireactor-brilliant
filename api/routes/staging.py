@@ -17,6 +17,7 @@ from models import (
     StagingResponse,
     StagingSubmit,
 )
+from services.access_log import log_entry_reads
 from services.ai_reviewer import review_staging_item
 
 router = APIRouter(tags=["staging"])
@@ -651,6 +652,14 @@ async def list_staging(
         )
         cur.row_factory = dict_row
         rows = await cur.fetchall()
+
+        # Observability: only log rows that surface a concrete target_entry_id.
+        # Staging items without one (e.g. pending creates) have no entry to log.
+        target_ids = [
+            str(r["target_entry_id"]) for r in rows if r.get("target_entry_id")
+        ]
+        if target_ids:
+            await log_entry_reads(conn, user, target_ids)
 
         return StagingList(
             items=[_row_to_response(r) for r in rows],

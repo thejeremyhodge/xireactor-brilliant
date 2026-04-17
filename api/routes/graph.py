@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 from auth import UserContext, get_current_user
 from database import get_db
 from models import GraphEdge, GraphNode, GraphResponse
+from services.access_log import log_entry_reads
 
 router = APIRouter(tags=["graph"])
 
@@ -126,6 +127,11 @@ async def get_graph(
             edge_rows = await cur.fetchall()
         else:
             edge_rows = []
+
+        # Observability: single batched INSERT for all returned node ids.
+        # Inside the conn block so the INSERT runs under the caller's RLS
+        # context; helper swallows its own errors.
+        await log_entry_reads(conn, user, node_ids)
 
     nodes = [
         GraphNode(
