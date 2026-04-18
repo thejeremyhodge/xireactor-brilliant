@@ -1,6 +1,6 @@
 # xiReactor Brilliant
 
-**v0.3.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+**v0.3.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
 
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent

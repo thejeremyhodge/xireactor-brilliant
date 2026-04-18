@@ -10,7 +10,7 @@ set -euo pipefail
 # Constants are consumed across phases; shellcheck can't see forward into
 # function bodies that arrive in later tasks (T-0176/T-0177). Suppress the
 # false-positive unused warnings at the declaration site.
-readonly SCRIPT_VERSION="0.3.1-dev"
+readonly SCRIPT_VERSION="0.3.1"
 readonly DEFAULT_CLONE_DIR="./xireactor-brilliant"
 readonly REPO_SLUG="thejeremyhodge/xireactor-brilliant"
 readonly API_URL="http://localhost:8010"

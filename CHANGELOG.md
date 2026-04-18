@@ -20,6 +20,23 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 - _nothing yet_
 
+## [0.3.1] — 2026-04-18 — Installer self-clone
+
+### Added
+- `install.sh` now self-clones the repo when invoked from outside a brilliant
+  checkout — the README's `curl … | bash` one-liner works from any directory
+  (issue [#29](https://github.com/thejeremyhodge/xireactor-brilliant/issues/29))
+- `--ref <tag|branch|sha>` flag — pick the git ref to clone; default is the
+  latest release tag (via GitHub releases API), with `main` as fallback
+- `--dir <path>` flag — override the clone target (default `./xireactor-brilliant`)
+- New CI job `smoke-self-clone` in `installer-smoke.yml` exercises the
+  zero-clone path end-to-end
+
+### Fixed
+- README's one-liner install example no longer contradicts the installer's
+  actual behavior; added a separate "Manual install (pre-cloned)" section
+  documenting the in-place path
+
 ## [0.3.0] — 2026-04-17 — Installer, attachments, observability, Brilliant rename
 
 > **Breaking:** container names, database name, OAuth scope, and `CORTEX_*` environment
