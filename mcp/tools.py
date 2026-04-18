@@ -25,6 +25,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         logical_path: str | None = None,
         department: str | None = None,
         tag: str | None = None,
+        fuzzy: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
@@ -32,6 +33,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         Use `q` for full-text search (ranked by relevance). Without `q`, results
         are ordered by last update. Combine filters to narrow results.
+
+        Set `fuzzy=true` to enable a trigram-similarity fallback when the exact
+        FTS query returns zero rows (e.g. a user typed "klaude" when they meant
+        "claude"). Fuzzy is a pure fallback — the exact/FTS path runs first and
+        is returned as-is when it has any hits. Default is False so existing
+        behavior is unchanged.
 
         Content types: context, project, meeting, decision, intelligence, daily,
         resource, department, team, system, onboarding.
@@ -47,6 +54,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["department"] = department
         if tag:
             params["tag"] = tag
+        if fuzzy:
+            params["fuzzy"] = "true"
         return await api.get("/entries", params=params)
 
     @mcp.tool()
