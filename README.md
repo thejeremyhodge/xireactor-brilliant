@@ -2,10 +2,19 @@
   <img src=".github/assets/logo.svg" width="140" alt="Brilliant logo" />
 </p>
 
-<h1 align="center">xiReactor Brilliant</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/title-dark.svg">
+    <img src=".github/assets/title-light.svg" width="520" alt="xiReactor / Brilliant" />
+  </picture>
+</p>
+
+<h2 align="center">One shared knowledge base for your whole AI-enabled team</h2>
 
 <p align="center">
-  <strong>Shared context that compounds.</strong>
+  Your people and your agents — reading, writing, and growing the same knowledge base,<br/>
+  with governance and permissions built in. Every conversation, decision, and document<br/>
+  compounds into leverage your team keeps from day one.
 </p>
 
 <p align="center">
