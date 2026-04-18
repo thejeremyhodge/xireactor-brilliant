@@ -22,7 +22,10 @@ both ``[[foo]]`` and ``[Foo](foo)`` produces exactly one ``entry_links`` row.
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
 # Capture the character preceding the `[` so we can reject image syntax
@@ -101,6 +104,7 @@ async def sync_entry_links(
             unique_targets.append(key)
 
     linked = 0
+    unresolved: list[str] = []
     for target in unique_targets:
         cur = await conn.execute(
             """SELECT id FROM entries
@@ -116,6 +120,7 @@ async def sync_entry_links(
         )
         row = await cur.fetchone()
         if row is None:
+            unresolved.append(target)
             continue
         target_id = str(row[0])
         if target_id == entry_id_s:
@@ -148,5 +153,16 @@ async def sync_entry_links(
             },
         )
         linked += 1
+
+    if unresolved:
+        # Non-fatal: the read-time resolver will pass unresolved refs through
+        # as literal text. Surface them at INFO so importers can see which
+        # wikilinks point at notes that don't exist yet.
+        logger.info(
+            "sync_entry_links: %d unresolved link target(s) for entry %s: %s",
+            len(unresolved),
+            entry_id_s,
+            ", ".join(unresolved[:10]),
+        )
 
     return linked
