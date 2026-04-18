@@ -57,6 +57,7 @@ _route_modules = [
     ("routes.staging", "staging", "/staging"),
     ("routes.import_files", "router", "/import"),
     ("routes.types", "types", "/types"),
+    ("routes.tags", "router", "/tags"),
     ("routes.session", "session", "/session-init"),
     ("routes.invitations", "invitations", "/invitations"),
     ("routes.permissions", "entry_perms_router", "/entries"),
