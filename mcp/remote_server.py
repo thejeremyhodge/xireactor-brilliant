@@ -30,7 +30,37 @@ logger = logging.getLogger("brilliant.auth")
 # ---------------------------------------------------------------------------
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "8001"))
-MCP_BASE_URL = os.environ.get("MCP_BASE_URL", "http://localhost:8011")
+_RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+_MCP_BASE_URL_RAW = os.environ.get("MCP_BASE_URL", "").strip()
+
+
+def _resolve_mcp_base_url() -> str:
+    """Resolve the MCP's public base URL (must include scheme).
+
+    Priority:
+      1. ``RENDER_EXTERNAL_URL`` — Render auto-injects this as a fully
+         qualified ``https://<service>.onrender.com`` on every web
+         service. This is the authoritative source on Render.
+      2. ``MCP_BASE_URL`` — explicit override (docker-compose, manual
+         deploys). If the operator provides a bare hostname we prepend
+         ``https://``; if they provide a full URL we respect it.
+      3. ``http://localhost:8011`` — local dev fallback.
+
+    The render.yaml ``fromService.property: host`` wire returns Render's
+    INTERNAL service-discovery name (e.g. ``brilliant-mcp``), NOT the
+    public FQDN, which is why ``MCP_BASE_URL`` cannot be trusted as-is
+    on the Render path. Prefer ``RENDER_EXTERNAL_URL`` there.
+    """
+    if _RENDER_EXTERNAL_URL:
+        return _RENDER_EXTERNAL_URL
+    if _MCP_BASE_URL_RAW:
+        if _MCP_BASE_URL_RAW.startswith(("http://", "https://")):
+            return _MCP_BASE_URL_RAW
+        return f"https://{_MCP_BASE_URL_RAW}"
+    return "http://localhost:8011"
+
+
+MCP_BASE_URL = _resolve_mcp_base_url()
 BRILLIANT_API_KEY = os.environ.get("BRILLIANT_API_KEY", "")
 TOKEN_EXPIRY_SECONDS = int(os.environ.get("TOKEN_EXPIRY_SECONDS", "3600"))
 
