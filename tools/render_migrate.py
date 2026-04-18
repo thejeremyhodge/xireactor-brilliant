@@ -58,6 +58,17 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 # bootstrapped DB is 027.
 INITDB_SNAPSHOT_MAX_NUMBER = 26
 
+# Migrations that exist for local demo/dogfood only and must NOT run on a
+# production Render deploy. Reasons per file:
+#   - 005_seed.sql — inserts demo users with publicly-known plaintext API
+#     keys and demo entries. Would be a security hole on a real deploy,
+#     and also fails under FORCE ROW LEVEL SECURITY because Render's
+#     auto-generated DB user is not a superuser. The /setup admin claim
+#     ceremony creates the real admin; production starts empty.
+# Listed files are still recorded in schema_migrations so the tool treats
+# them as "applied" and doesn't retry them every deploy.
+SKIP_ON_RENDER = {"005_seed.sql"}
+
 _NUM_RE = re.compile(r"^(\d+)_")
 
 
@@ -146,6 +157,23 @@ def main() -> int:
             name = path.name
             if name in applied:
                 skipped += 1
+                continue
+
+            # Record-but-don't-run for demo-only migrations (see SKIP_ON_RENDER).
+            if name in SKIP_ON_RENDER:
+                try:
+                    with conn.transaction():
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO schema_migrations (filename) "
+                                "VALUES (%s) ON CONFLICT DO NOTHING",
+                                (name,),
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"FAILED recording skip for {name}: {exc}", file=sys.stderr)
+                    return 2
+                print(f"Skipped {name} (demo-only, not applied on Render)")
+                applied_this_run += 1
                 continue
 
             sql = path.read_text(encoding="utf-8")
