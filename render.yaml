@@ -38,7 +38,7 @@ services:
     plan: starter
     region: oregon
     dockerfilePath: ./api/Dockerfile
-    dockerContext: ./api
+    dockerContext: .
     # Override the Dockerfile CMD to drop `--reload` in production.
     startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
     # Runs before every deploy (Render executes this inside the built
