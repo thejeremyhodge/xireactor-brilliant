@@ -26,12 +26,33 @@ Zero to working API in under 5 minutes.
 
 ### One-liner install
 
+Pipe the installer into `bash` from any directory — it will detect that it isn't inside a clone and self-clone the latest release tag into `./xireactor-brilliant` before continuing:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thejeremyhodge/xireactor-brilliant/main/install.sh \
   | bash -s -- --admin-email you@example.com
 ```
 
-The installer clones nothing — it runs against the repo you already cloned, or you can pipe it straight into bash to exercise the self-contained path. It prints an eight-phase plan, stands the stack up, and finishes with a summary banner containing your admin API key. The same key is written to `./brilliant-credentials.txt` (mode 600).
+The installer prints a phased plan, stands the stack up, and finishes with a summary banner containing your admin API key. The same key is written to `./brilliant-credentials.txt` (mode 600, inside the cloned directory).
+
+To pin a specific version or track `main`, pass `--ref`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thejeremyhodge/xireactor-brilliant/main/install.sh \
+  | bash -s -- --admin-email you@example.com --ref v0.3.0
+```
+
+To pick a different clone target, pass `--dir /path/to/target`.
+
+### Manual install (pre-cloned)
+
+If you prefer to inspect the repo before running anything, clone it first. When the installer is invoked from inside a clone it runs in place and never re-clones:
+
+```bash
+git clone https://github.com/thejeremyhodge/xireactor-brilliant.git
+cd xireactor-brilliant
+./install.sh --admin-email you@example.com
+```
 
 Dry-run the plan first if you want to see what it will do:
 

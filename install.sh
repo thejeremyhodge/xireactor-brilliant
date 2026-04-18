@@ -10,7 +10,9 @@ set -euo pipefail
 # Constants are consumed across phases; shellcheck can't see forward into
 # function bodies that arrive in later tasks (T-0176/T-0177). Suppress the
 # false-positive unused warnings at the declaration site.
-readonly SCRIPT_VERSION="0.3.0-dev"
+readonly SCRIPT_VERSION="0.3.1-dev"
+readonly DEFAULT_CLONE_DIR="./xireactor-brilliant"
+readonly REPO_SLUG="thejeremyhodge/xireactor-brilliant"
 readonly API_URL="http://localhost:8010"
 # shellcheck disable=SC2034
 readonly MCP_URL="http://localhost:8011"
@@ -36,6 +38,9 @@ FORCE=0
 NO_INSTALL_DOCKER=0
 DRY_RUN=0
 MIGRATE_FROM_CORTEX=0
+REF=""
+REF_EXPLICIT=0
+CLONE_DIR="${DEFAULT_CLONE_DIR}"
 
 # ---------- logging ----------
 
@@ -104,6 +109,13 @@ Optional:
                              rename the cortex DB to brilliant, tear down old
                              containers, and bring up the renamed stack with
                              the existing data volume preserved.
+  --ref REF                  Git ref (tag, branch, or sha) to clone when the
+                             installer is not already inside a brilliant repo.
+                             Default: latest release tag, or `main` if the
+                             release API is unreachable.
+  --dir PATH                 Target directory for the self-clone. Default:
+                             ./xireactor-brilliant. Ignored when the installer
+                             is already inside a brilliant repo.
   -h, --help                 Show this message.
 
 Examples:
@@ -135,6 +147,10 @@ parse_flags() {
       --no-install-docker)   NO_INSTALL_DOCKER=1; shift ;;
       --dry-run)             DRY_RUN=1; shift ;;
       --migrate-from-cortex) MIGRATE_FROM_CORTEX=1; shift ;;
+      --ref)                 REF="${2:-}"; REF_EXPLICIT=1; shift 2 ;;
+      --ref=*)               REF="${1#*=}"; REF_EXPLICIT=1; shift ;;
+      --dir)                 CLONE_DIR="${2:-}"; shift 2 ;;
+      --dir=*)               CLONE_DIR="${1#*=}"; shift ;;
       -h|--help)             print_help; exit 0 ;;
       *) die 64 "Unknown flag: $1 (try --help)" ;;
     esac
@@ -249,8 +265,79 @@ phase_docker() {
   log "phase 2" "docker + compose V2 ready"
 }
 
+in_brilliant_repo() {
+  [ -f "./docker-compose.yml" ] && [ -f "./.env.sample" ]
+}
+
+resolve_latest_release_tag() {
+  # Fetches "tag_name" from GitHub's latest-release API. Prints the tag on
+  # stdout, or nothing on failure. No jq dep — grep + cut parse.
+  local api="https://api.github.com/repos/${REPO_SLUG}/releases/latest"
+  curl -fsSL --max-time 10 "$api" 2>/dev/null \
+    | grep -m1 '"tag_name"' \
+    | cut -d'"' -f4 \
+    || true
+}
+
+phase_self_clone() {
+  # Skip entirely when already inside a brilliant repo — preserves in-place
+  # behavior for maintainers and pre-cloned users.
+  if in_brilliant_repo; then
+    log "phase 1b" "already inside a brilliant repo — running in place"
+    return 0
+  fi
+
+  # Resolve ref. If the user passed --ref, honor it verbatim. Otherwise try
+  # the releases API and fall back to `main` on any failure.
+  if [ "$REF_EXPLICIT" -eq 0 ]; then
+    local resolved
+    resolved="$(resolve_latest_release_tag)"
+    if [ -n "$resolved" ]; then
+      REF="$resolved"
+      log "phase 1b" "resolved --ref to ${REF} (latest release)"
+    else
+      REF="main"
+      log "phase 1b" "release API unreachable or empty — falling back to ref 'main'"
+    fi
+  else
+    log "phase 1b" "using user-supplied ref: ${REF}"
+  fi
+
+  require_tool git
+
+  # Guard the target directory. If it already exists and is non-empty, abort
+  # unless --force was passed (--force is already the opt-in for overwriting).
+  if [ -e "$CLONE_DIR" ]; then
+    if [ ! -d "$CLONE_DIR" ]; then
+      die 81 "--dir target exists and is not a directory: ${CLONE_DIR}"
+    fi
+    if [ -n "$(ls -A "$CLONE_DIR" 2>/dev/null)" ] && [ "$FORCE" -eq 0 ]; then
+      die 81 "--dir target ${CLONE_DIR} is non-empty. Remove it, pick another --dir, or pass --force."
+    fi
+  fi
+
+  log "phase 1b" "git clone --depth 1 --branch ${REF} https://github.com/${REPO_SLUG}.git ${CLONE_DIR}"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    # If --force and the dir exists, clear it first so `git clone` doesn't balk.
+    if [ -d "$CLONE_DIR" ] && [ "$FORCE" -eq 1 ]; then
+      rm -rf "$CLONE_DIR"
+    fi
+    if ! git clone --depth 1 --branch "$REF" \
+        "https://github.com/${REPO_SLUG}.git" "$CLONE_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+      die 82 "git clone of ${REPO_SLUG}@${REF} into ${CLONE_DIR} failed. See ${LOG_FILE}."
+    fi
+    cd "$CLONE_DIR"
+    log "phase 1b" "cd $(pwd)"
+  fi
+
+  # Verify the cloned tree really is a brilliant repo.
+  if [ "$DRY_RUN" -eq 0 ] && ! in_brilliant_repo; then
+    die 83 "cloned tree at ${CLONE_DIR} is missing docker-compose.yml or .env.sample — wrong ref?"
+  fi
+}
+
 phase_repo() {
-  log "phase 3" "repo presence (stub — we're inside the repo already)"
+  log "phase 3" "repo presence (inside $(pwd))"
 }
 
 set_env_var() {
@@ -531,16 +618,19 @@ Resolved configuration:
   key-out:            ${KEY_OUT}
   force:              ${FORCE}
   no-install-docker:  ${NO_INSTALL_DOCKER}
+  ref:                ${REF:-(latest release tag; fallback main)}
+  dir:                ${CLONE_DIR}
 
 Planned phases:
-  [phase 1] preflight — OS detect, bash 4+, openssl + curl present
-  [phase 2] docker    — detect; install Colima (Mac) or get.docker.com (Linux) if missing
-  [phase 3] repo      — confirm we're inside the brilliant repo (docker-compose.yml present)
-  [phase 4] randoms   — fill unset secrets via openssl rand
-  [phase 5] env       — write ./.env from .env.sample (mode 600); refuse overwrite without --force
-  [phase 6] up        — docker compose up -d, poll ${API_URL}/health for up to ${HEALTH_TIMEOUT_SECONDS}s
-  [phase 7] verify    — GET ${API_URL}/entries with admin key to confirm bootstrap
-  [phase 8] summary   — print banner, write key to ${KEY_OUT} (mode 600)
+  [phase 1]  preflight   — OS detect, bash 3.2+, openssl + curl present
+  [phase 1b] self-clone  — if not inside a brilliant repo, git clone --ref into --dir and cd in
+  [phase 2]  docker      — detect; install Colima (Mac) or get.docker.com (Linux) if missing
+  [phase 3]  repo        — confirm we're inside the brilliant repo (docker-compose.yml present)
+  [phase 4]  randoms     — fill unset secrets via openssl rand
+  [phase 5]  env         — write ./.env from .env.sample (mode 600); refuse overwrite without --force
+  [phase 6]  up          — docker compose up -d, poll ${API_URL}/health for up to ${HEALTH_TIMEOUT_SECONDS}s
+  [phase 7]  verify      — GET ${API_URL}/entries with admin key to confirm bootstrap
+  [phase 8]  summary     — print banner, write key to ${KEY_OUT} (mode 600)
 
 PLAN
 }
@@ -589,6 +679,7 @@ main() {
   log "phase 0" "install.sh v${SCRIPT_VERSION} starting"
 
   phase_preflight
+  phase_self_clone
   phase_docker
   phase_repo
   phase_randoms
