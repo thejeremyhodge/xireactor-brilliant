@@ -165,6 +165,47 @@ Use the returned `api_key` value as your Bearer token. (Login issues a fresh API
 
 </details>
 
+## Deploy to Render
+
+Zero-ops alternative to `install.sh` — one click provisions the whole stack on Render, no Docker or Postgres know-how required.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/thejeremyhodge/xireactor-brilliant)
+
+Render reads `render.yaml` from the repo root and provisions:
+
+- `brilliant-api` — FastAPI service (Starter)
+- `brilliant-mcp` — remote MCP server for Claude (Starter)
+- `brilliant-db` — managed Postgres (Basic-256mb)
+- 1 GB persistent disk attached to the api service at `/data` (attachment blobs)
+
+**Cost:** ~$20–25/mo all-in (two Starter web services + Basic-256mb Postgres + 1 GB disk).
+
+### Why Starter, not Free
+
+Free tier works for a throwaway demo, but not for a KB you care about:
+
+- **Postgres is deleted after 30 days.** Your entries, users, and governance history go with it.
+- **No persistent disks.** Attachments have nowhere to live — the PDF digest pipeline breaks.
+- **15-minute idle spin-down + ~60 s cold start.** Every MCP call from Claude eats a minute of latency, which makes the agent UX unusable.
+
+Sources: [render.com/pricing](https://render.com/pricing), [render.com/docs/free](https://render.com/docs/free), [render.com/docs/disks](https://render.com/docs/disks).
+
+### End-to-end flow
+
+1. **Click the button.** Render prompts for `ADMIN_EMAIL` — the only user-provided input. Password and API key are captured after deploy.
+2. **Wait ~3 minutes** while Render builds the two Docker images, provisions the database, runs migrations (via `preDeployCommand`), and boots the services.
+3. **Visit the api service URL.** The root route redirects to `/setup` because the `first_run_complete` latch is still false.
+4. **Choose a password** on `/setup`. Submit → credentials page renders inline with: your admin email, a freshly-minted API key, the MCP connector URL (wired from the `brilliant-mcp` service), and a login URL. Copy buttons + a `brilliant-credentials.txt` download button save everything in one click. The `/setup` route then 404s forever.
+5. **Paste the MCP URL into Claude** (Co-work or Claude Code) to connect. Use the API key as the Bearer token for direct REST calls against `brilliant-api`.
+
+### Lost your API key?
+
+Visit `https://<your-api-host>/auth/login` and sign in with the email and password you chose at `/setup`. Signing in **rotates the key** — all prior keys are invalidated, a fresh one is issued, and the same `brilliant-credentials.txt` download is offered. This doubles as a panic button if you suspect a key leaked.
+
+### Escape valves
+
+Render is one option, not the only one. For larger deployments or different constraints, self-host with `install.sh` (local Docker) or bring your own Postgres / S3-compatible object storage — see [ARCHITECTURE.md](ARCHITECTURE.md) for the component boundaries.
+
 ## Features
 
 | Feature | Status |

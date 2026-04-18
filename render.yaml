@@ -1,0 +1,123 @@
+# ============================================================
+# xiReactor Brilliant — Render Blueprint
+# ============================================================
+# One-click deploy for non-technical operators. Provisions:
+#   - brilliant-api  (FastAPI, Docker)           — Starter plan
+#   - brilliant-mcp  (MCP remote server, Docker) — Starter plan
+#   - brilliant-db   (Managed Postgres)          — Basic-256mb
+#   - 1 GB disk attached to api at /data (attachment blobs)
+#
+# Spec:   .xireactor/specs/0037b--2026-04-18--render-first-deploy-adapter.md
+# README: "Deploy to Render" section — recovery flow + Starter tier rationale
+#
+# Deploy-time input: ADMIN_EMAIL is the only required user-provided value.
+# After provision, the admin visits `/setup`, chooses a password, and the
+# server generates the API key + displays the MCP URL on `/setup/done`.
+# (ADMIN_PASSWORD / ADMIN_API_KEY are NOT env vars on the Render path —
+#  they are captured POST-deploy by the /setup flow.)
+#
+# fromService wiring: `property: host` returns the bare hostname
+# (e.g. "brilliant-mcp.onrender.com"). The application code is responsible
+# for prepending "https://" when it renders the URL in the UI. This is the
+# documented Render pattern; Render does not expose a full-URL property.
+# ============================================================
+
+databases:
+  - name: brilliant-db
+    plan: basic-256mb
+    databaseName: brilliant
+    user: postgres
+
+services:
+  # ----------------------------------------------------------
+  # API — FastAPI app, Dockerfile at ./api/Dockerfile
+  # ----------------------------------------------------------
+  - type: web
+    name: brilliant-api
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: ./api
+    # Override the Dockerfile CMD to drop `--reload` in production.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
+    # Runs before every deploy (Render executes this inside the built
+    # image against the live DB). Idempotent migrations 001..027.
+    preDeployCommand: python tools/render_migrate.py
+    disk:
+      name: brilliant-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # --- Database ---
+      - key: DATABASE_URL
+        fromDatabase:
+          name: brilliant-db
+          property: connectionString
+
+      # --- Admin bootstrap (Render path) ---
+      # Only ADMIN_EMAIL is captured at deploy time; password + API key
+      # are set POST-deploy via /setup. See api/admin_bootstrap.py.
+      - key: ADMIN_EMAIL
+        sync: false
+
+      # --- Storage (local disk at /data) ---
+      - key: STORAGE_BACKEND
+        value: local
+      - key: LOCAL_STORAGE_ROOT
+        value: /data/uploads
+
+      # --- MCP public URL wiring ---
+      # Render returns the bare hostname; the app prepends `https://`
+      # when rendering the URL in /setup/done and /login.
+      - key: BRILLIANT_MCP_PUBLIC_URL
+        fromService:
+          type: web
+          name: brilliant-mcp
+          property: host
+
+      # --- Optional Tier 3 AI reviewer ---
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+  # ----------------------------------------------------------
+  # MCP — remote MCP server, Dockerfile at ./mcp/Dockerfile
+  # ----------------------------------------------------------
+  - type: web
+    name: brilliant-mcp
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./mcp/Dockerfile
+    dockerContext: ./mcp
+    # Dockerfile CMD `python remote_server.py` is fine for production.
+    envVars:
+      # --- Database (for OAuth store + session logs) ---
+      - key: DATABASE_URL
+        fromDatabase:
+          name: brilliant-db
+          property: connectionString
+
+      # --- API base URL (internal-to-Render, https on the public host) ---
+      # Render returns the bare hostname; remote_server.py prepends
+      # `https://` when constructing the outbound URL.
+      - key: BRILLIANT_BASE_URL
+        fromService:
+          type: web
+          name: brilliant-api
+          property: host
+
+      # --- MCP self-URL ---
+      # MCP_PORT must match what Render binds; remote_server.py reads
+      # MCP_BASE_URL from its own $RENDER_EXTERNAL_URL at boot if unset.
+      # We still export MCP_BASE_URL using the self-hostname for clarity.
+      - key: MCP_PORT
+        value: "8001"
+      - key: MCP_BASE_URL
+        fromService:
+          type: web
+          name: brilliant-mcp
+          property: host
+
+      - key: TOKEN_EXPIRY_SECONDS
+        value: "3600"
