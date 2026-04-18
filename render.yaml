@@ -26,7 +26,9 @@ databases:
   - name: brilliant-db
     plan: basic-256mb
     databaseName: brilliant
-    user: postgres
+    # user omitted — Render auto-generates the DB user; `postgres` is reserved
+    # and rejected by Blueprint validation. DATABASE_URL still resolves via
+    # `fromDatabase.property: connectionString` below.
 
 services:
   # ----------------------------------------------------------
@@ -40,7 +42,9 @@ services:
     dockerfilePath: ./api/Dockerfile
     dockerContext: .
     # Override the Dockerfile CMD to drop `--reload` in production.
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
+    # Render's Docker runtime uses `dockerCommand` (not `startCommand`,
+    # which is native-runtime only).
+    dockerCommand: uvicorn main:app --host 0.0.0.0 --port 8000
     # Runs before every deploy (Render executes this inside the built
     # image against the live DB). Idempotent migrations 001..027.
     preDeployCommand: python tools/render_migrate.py
