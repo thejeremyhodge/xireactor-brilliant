@@ -37,3 +37,45 @@ jobs:
       - name: Dump compose logs on failure
         if: failure()
         run: docker compose logs --tail 200 || true
+
+  smoke-self-clone:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run installer from an empty scratch dir (self-clone path)
+        env:
+          # github.head_ref is set on PRs (source branch). github.ref_name covers
+          # push events. GITHUB_SHA is a merge commit on PRs and can't be cloned
+          # with `git clone --branch`, so we need the branch name instead.
+          SELF_CLONE_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          SCRATCH="$(mktemp -d)"
+          cd "$SCRATCH"
+          bash "$GITHUB_WORKSPACE/install.sh" \
+            --ref "$SELF_CLONE_REF" \
+            --dir ./clone \
+            --admin-email smoke-selfclone@example.com \
+            --force \
+            --key-out /tmp/self-clone-key.txt
+          test -f /tmp/self-clone-key.txt
+          test -d "$SCRATCH/clone/.git"
+          curl -fsS http://localhost:8010/health >/dev/null
+          key="$(cat /tmp/self-clone-key.txt)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${key}" \
+            http://localhost:8010/entries)"
+          if [ "$code" != "200" ]; then
+            echo "FAIL: /entries returned $code"; exit 12
+          fi
+          echo "PASS: self-clone path OK"
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: |
+          # Compose lives inside the cloned dir; we don't know the exact path.
+          # Try a best-effort dump.
+          find /tmp -maxdepth 4 -name docker-compose.yml -print 2>/dev/null || true
+          docker ps -a || true
