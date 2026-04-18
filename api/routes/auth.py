@@ -101,15 +101,30 @@ def _render_login_form(email: str = "", error: str | None = None) -> str:
 """
 
 
-def _mcp_url_for_display() -> str:
+async def _mcp_url_for_display(pool) -> str:
     """Render the MCP connector URL for display alongside rotated credentials.
 
-    Mirrors ``api/routes/setup.py::_mcp_url_for_display``. ``BRILLIANT_MCP_PUBLIC_URL``
-    is wired into the API service via ``fromService`` in ``render.yaml`` as a
-    bare hostname (e.g. ``brilliant-mcp.onrender.com``) — we prepend
-    ``https://`` here. If it's already a full URL we respect it. On local
-    dev the var is unset, so we fall back to the documented local MCP URL.
+    Mirrors ``api/routes/setup.py::_mcp_url_for_display``. Resolution order:
+
+    1. ``brilliant_settings.mcp_public_url`` — populated by the MCP service
+       at boot with its own ``RENDER_EXTERNAL_URL``. Authoritative on Render.
+    2. ``BRILLIANT_MCP_PUBLIC_URL`` env var — fallback when the DB column
+       is NULL (local dev or a fresh deploy before MCP's first boot). If
+       the operator provided a bare hostname we prepend ``https://``.
+    3. ``http://localhost:8011`` — last-resort local dev default.
     """
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT mcp_public_url FROM brilliant_settings WHERE id = 1"
+            )
+            row = await cur.fetchone()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        # Column may not exist yet (migration 029 pending); fall through.
+        pass
+
     raw = os.getenv("BRILLIANT_MCP_PUBLIC_URL", "").strip()
     if not raw:
         return "http://localhost:8011"
@@ -386,7 +401,7 @@ async def login(request: Request):
             )
 
         login_url = _login_url_from_request(request)
-        mcp_url = _mcp_url_for_display()
+        mcp_url = await _mcp_url_for_display(get_pool())
         return HTMLResponse(
             _render_credentials_page(
                 email=user["email"] or email,

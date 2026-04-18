@@ -1,0 +1,33 @@
+-- 029_mcp_public_url.sql
+-- Add mcp_public_url to the brilliant_settings singleton so the MCP service
+-- can publish its Render-provided external URL back to the API.
+--
+-- Context
+-- -------
+-- render.yaml wires BRILLIANT_MCP_PUBLIC_URL via fromService.property:host,
+-- which (contrary to earlier assumptions) returns Render's INTERNAL service-
+-- discovery name (e.g. "brilliant-mcp") and NOT the public FQDN. The API
+-- service can't construct the MCP's real URL from that alone — account-level
+-- name collisions cause Render to add random suffixes, so the ".onrender.com"
+-- convention isn't reliable.
+--
+-- Fix
+-- ---
+-- Each MCP boot reads its own $RENDER_EXTERNAL_URL (which IS the authoritative
+-- full public URL) and writes it here. The API reads this column when
+-- rendering /setup/done and /auth/login credentials pages, falling back to
+-- the env var if the column is NULL (local dev, fresh DB before first MCP
+-- boot).
+--
+-- Grants: migration 027 already grants UPDATE on brilliant_settings to
+-- kb_admin and SELECT to every kb_* role. The MCP writes under SET LOCAL
+-- ROLE kb_admin; the API reads under whatever role the request middleware
+-- scopes to. No extra GRANTs needed.
+--
+-- Depends on: 027_first_run_flag.sql
+-- Surfaced during: T-0219 Render wet-test (2026-04-18) — follow-up after
+--                  da92c34 fixed MCP's own AuthSettings URL via the same
+--                  RENDER_EXTERNAL_URL mechanism.
+
+ALTER TABLE brilliant_settings
+    ADD COLUMN IF NOT EXISTS mcp_public_url TEXT;

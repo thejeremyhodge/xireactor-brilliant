@@ -7,6 +7,8 @@ import os
 import secrets
 import time
 
+import psycopg
+
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
@@ -63,6 +65,58 @@ def _resolve_mcp_base_url() -> str:
 MCP_BASE_URL = _resolve_mcp_base_url()
 BRILLIANT_API_KEY = os.environ.get("BRILLIANT_API_KEY", "")
 TOKEN_EXPIRY_SECONDS = int(os.environ.get("TOKEN_EXPIRY_SECONDS", "3600"))
+
+
+def _publish_public_url_to_db() -> None:
+    """Publish this MCP's public URL to ``brilliant_settings.mcp_public_url``.
+
+    Render's ``fromService.property: host`` returns the internal service-
+    discovery name (e.g. ``brilliant-mcp``), not the public FQDN — so the
+    API service can't construct the MCP's real URL from that alone. This
+    function writes our authoritative ``RENDER_EXTERNAL_URL`` into a shared
+    DB column that the API reads when rendering ``/setup/done`` and
+    ``/auth/login`` credentials pages.
+
+    Failure-tolerant by design: a missing ``mcp_public_url`` column
+    (migration 029 not yet applied) or an unreachable DB must not prevent
+    the MCP from serving traffic. We log and continue.
+
+    Idempotent: the UPDATE re-writes the same value on every boot, and the
+    row is a singleton keyed by ``id = 1``.
+    """
+    if not _RENDER_EXTERNAL_URL:
+        return  # local dev — nothing authoritative to publish
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if not dsn:
+        return
+    try:
+        with psycopg.connect(dsn) as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    # SET LOCAL ROLE to kb_admin so the UPDATE is authorised
+                    # under the grant from migration 027. Works locally
+                    # (superuser) and on Render (connection user is a
+                    # member of kb_admin via migration 028).
+                    cur.execute("SET LOCAL ROLE kb_admin")
+                    cur.execute(
+                        "UPDATE brilliant_settings "
+                        "SET mcp_public_url = %s, updated_at = now() "
+                        "WHERE id = 1",
+                        (_RENDER_EXTERNAL_URL,),
+                    )
+        logger.info(
+            "Published MCP public URL to brilliant_settings: %s",
+            _RENDER_EXTERNAL_URL,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block MCP boot on this
+        logger.warning(
+            "Could not publish MCP public URL to brilliant_settings "
+            "(DB unreachable or migration 029 not yet applied): %s",
+            exc,
+        )
+
+
+_publish_public_url_to_db()
 
 
 # ---------------------------------------------------------------------------

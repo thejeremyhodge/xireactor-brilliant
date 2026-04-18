@@ -16,10 +16,14 @@
 # (ADMIN_PASSWORD / ADMIN_API_KEY are NOT env vars on the Render path —
 #  they are captured POST-deploy by the /setup flow.)
 #
-# fromService wiring: `property: host` returns the bare hostname
-# (e.g. "brilliant-mcp.onrender.com"). The application code is responsible
-# for prepending "https://" when it renders the URL in the UI. This is the
-# documented Render pattern; Render does not expose a full-URL property.
+# fromService wiring: `property: host` returns Render's INTERNAL service-
+# discovery name (e.g. "brilliant-mcp") — NOT the public FQDN. Render does
+# not expose a full-URL property via fromService. For the API service to
+# display the MCP's public URL on /setup/done and /auth/login, the MCP
+# service writes its own $RENDER_EXTERNAL_URL into brilliant_settings.mcp_public_url
+# at boot (see mcp/remote_server.py::_publish_public_url_to_db and migration
+# 029). The BRILLIANT_MCP_PUBLIC_URL env below is kept only as a fallback
+# for local dev / explicit override.
 # ============================================================
 
 databases:
@@ -71,9 +75,13 @@ services:
       - key: LOCAL_STORAGE_ROOT
         value: /data/uploads
 
-      # --- MCP public URL wiring ---
-      # Render returns the bare hostname; the app prepends `https://`
-      # when rendering the URL in /setup/done and /login.
+      # --- MCP public URL fallback ---
+      # Authoritative MCP URL is written into brilliant_settings.mcp_public_url
+      # by the MCP service at boot (from its own $RENDER_EXTERNAL_URL). This
+      # env var is only read by the API as a fallback when that DB column is
+      # NULL — e.g. before the MCP service has completed its first boot, or
+      # on local dev where RENDER_EXTERNAL_URL is unset. fromService here
+      # yields the internal service name only (useful as a tag, not a URL).
       - key: BRILLIANT_MCP_PUBLIC_URL
         fromService:
           type: web
@@ -102,9 +110,13 @@ services:
           name: brilliant-db
           property: connectionString
 
-      # --- API base URL (internal-to-Render, https on the public host) ---
-      # Render returns the bare hostname; remote_server.py prepends
-      # `https://` when constructing the outbound URL.
+      # --- API base URL (internal-to-Render service-discovery name) ---
+      # Render returns the internal service name (e.g. "brilliant-api") here,
+      # NOT the public FQDN. mcp/client.py prepends `https://` when building
+      # the outbound URL — internal-network resolution on Render maps the
+      # bare name to the service. If you ever need a public URL here, the
+      # same RENDER_EXTERNAL_URL + DB-publish pattern used for the MCP URL
+      # (migration 029) is the way.
       - key: BRILLIANT_BASE_URL
         fromService:
           type: web

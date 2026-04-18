@@ -87,18 +87,38 @@ def _login_url_from_request(request: Request) -> str:
     return f"{scheme}://{host}/auth/login"
 
 
-def _mcp_url_for_display() -> str:
+async def _mcp_url_for_display(pool) -> str:
     """Render the MCP connector URL for display on ``/setup/done``.
 
-    ``BRILLIANT_MCP_PUBLIC_URL`` is wired into the API service via
-    ``fromService`` in ``render.yaml`` as a BARE HOSTNAME
-    (e.g. ``brilliant-mcp.onrender.com``) — we prepend ``https://`` here.
-    When unset (e.g. local dev), fall back to the documented local MCP URL.
+    Resolution order:
+
+    1. ``brilliant_settings.mcp_public_url`` — populated by the MCP service
+       at boot with its own ``RENDER_EXTERNAL_URL`` (see
+       ``mcp/remote_server.py::_publish_public_url_to_db``). This is the
+       authoritative source on Render, where ``fromService.property: host``
+       only exposes the internal service-discovery name.
+    2. ``BRILLIANT_MCP_PUBLIC_URL`` env var — explicit override or
+       fallback when the DB column is NULL (local dev, or a fresh Render
+       deploy before the MCP service has completed its first boot). We
+       prepend ``https://`` if the operator provided a bare hostname.
+    3. ``http://localhost:8011`` — last-resort local dev default.
     """
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT mcp_public_url FROM brilliant_settings WHERE id = 1"
+            )
+            row = await cur.fetchone()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        # Column may not exist yet (migration 029 pending); fall through
+        # to the env-var path rather than 500ing the /setup/done render.
+        pass
+
     raw = os.getenv("BRILLIANT_MCP_PUBLIC_URL", "").strip()
     if not raw:
         return "http://localhost:8011"
-    # If the operator provided a full URL already, respect it.
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw
     return f"https://{raw}"
@@ -427,7 +447,7 @@ async def setup_submit(
         # Another request raced us to the latch — treat as sealed.
         raise HTTPException(status_code=404, detail="Not found")
 
-    mcp_url = _mcp_url_for_display()
+    mcp_url = await _mcp_url_for_display(pool)
     login_url = _login_url_from_request(request)
 
     return HTMLResponse(
