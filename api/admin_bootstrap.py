@@ -114,6 +114,24 @@ async def _create_admin_and_flip_latch(
                     "first_run_complete=TRUE; admin bootstrap is closed"
                 )
 
+            # Ensure the `org_demo` organization exists before the admin
+            # user INSERT below (users.org_id FK → organizations.id).
+            # Locally, 005_seed.sql creates this row; on Render we skip
+            # 005_seed (hardcoded demo API keys = security hole) so we
+            # must create the org here. Idempotent via ON CONFLICT so
+            # the docker-compose path remains a no-op.
+            await conn.execute(
+                """
+                INSERT INTO organizations (id, name, settings)
+                VALUES (
+                    'org_demo',
+                    'Demo Organization',
+                    '{"governance_tier_default": 2, "max_entries": 10000}'
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
+
             # Insert admin user (exact same values as v0.3.1 env-driven path).
             await conn.execute(
                 """
