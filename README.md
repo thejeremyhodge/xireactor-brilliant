@@ -5,7 +5,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/assets/title-dark.svg">
-    <img src=".github/assets/title-light.svg" width="520" alt="xiReactor / Brilliant" />
+    <img src=".github/assets/title-light.svg" width="440" alt="xiReactor / Brilliant" />
   </picture>
 </p>
 
