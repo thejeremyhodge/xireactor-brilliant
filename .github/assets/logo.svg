@@ -1,0 +1,26 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Brilliant logo">
+  <defs>
+    <linearGradient id="gemEdge" gradientUnits="userSpaceOnUse" x1="50" y1="13" x2="50" y2="93">
+      <stop offset="0" stop-color="#8aa0ff"/>
+      <stop offset="1" stop-color="#4558c9"/>
+    </linearGradient>
+  </defs>
+  <polygon points="28,13 72,13 85,34 50,93 15,34" fill="none" stroke="#000000" stroke-width="5" stroke-linejoin="round"/>
+  <polygon points="28,13 72,13 85,34 50,93 15,34" fill="url(#gemEdge)" stroke="#ffffff" stroke-width="2.4" stroke-linejoin="round"/>
+  <g>
+    <polygon points="30,17 20,34 40,34" fill="#ffffff"/>
+    <polygon points="30,17 50,17 40,34" fill="url(#gemEdge)"/>
+    <polygon points="50,17 40,34 60,34" fill="#ffffff"/>
+    <polygon points="50,17 70,17 60,34" fill="url(#gemEdge)"/>
+    <polygon points="70,17 60,34 80,34" fill="#ffffff"/>
+    <polygon points="20,34 40,34 30,51" fill="url(#gemEdge)"/>
+    <polygon points="40,34 30,51 50,51" fill="#ffffff"/>
+    <polygon points="40,34 60,34 50,51" fill="url(#gemEdge)"/>
+    <polygon points="60,34 50,51 70,51" fill="#ffffff"/>
+    <polygon points="60,34 80,34 70,51" fill="url(#gemEdge)"/>
+    <polygon points="30,51 50,51 40,68" fill="url(#gemEdge)"/>
+    <polygon points="50,51 40,68 60,68" fill="#ffffff"/>
+    <polygon points="50,51 70,51 60,68" fill="url(#gemEdge)"/>
+    <polygon points="40,68 60,68 50,85" fill="url(#gemEdge)"/>
+  </g>
+</svg>
