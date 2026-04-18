@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from database import init_pool, close_pool, get_pool
 from admin_bootstrap import ensure_admin_user
@@ -48,6 +49,39 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/")
+async def root():
+    """Root dispatcher — redirect to /setup on fresh deploys, else health JSON.
+
+    Inspects the ``brilliant_settings.first_run_complete`` latch (migration
+    027). When FALSE, this is a fresh deploy that hasn't claimed its admin
+    user yet — redirect the browser to ``/setup`` so the Render
+    click-deploy flow lands the operator on the setup form automatically.
+    When TRUE, the admin has already been claimed and the root returns a
+    small health-style JSON body (``/health`` remains the canonical probe
+    endpoint for Render; this root stays JSON for backwards-compat).
+
+    Uses a raw pool connection (no RLS context) — the latch is readable by
+    every PG role per migration 027.
+    """
+    pool = get_pool()
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT first_run_complete FROM brilliant_settings WHERE id = 1"
+            )
+            row = await cur.fetchone()
+    except Exception:
+        # DB unavailable or migration 027 not applied yet — fall through to
+        # the default JSON response so health-style probes don't get 500s.
+        row = None
+
+    if row is not None and row[0] is False:
+        return RedirectResponse(url="/setup", status_code=307)
+
+    return {"status": "ok", "docs": "/docs"}
+
+
 # Register route modules — try/except since they may not exist yet
 _route_modules = [
     ("routes.entries", "entries", "/entries"),
@@ -70,6 +104,8 @@ _route_modules = [
     ("routes.comments", "comments_router", "/comments"),
     ("routes.attachments", "router", "/attachments"),
     ("routes.analytics", "router", "/analytics"),
+    # Setup ceremony — empty prefix keeps /setup at the root.
+    ("routes.setup", "router", ""),
 ]
 
 for module_path, attr_name, prefix in _route_modules:
