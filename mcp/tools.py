@@ -129,6 +129,29 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         """
         return await api.get("/session-init")
 
+    @mcp.tool()
+    async def suggest_tags(content: str, limit: int = 10) -> dict:
+        """Suggest tags for free-form content, drawn from your org's existing vocabulary.
+
+        Ranks tags already in use across your published entries by how well
+        they match ``content`` (case-insensitive substring, whole-word bonus)
+        weighted by each tag's usage frequency. No LLM, no embeddings —
+        deterministic and fast. RLS scopes the corpus to your org.
+
+        Returns up to ``limit`` suggestions, each with:
+          tag          — the tag string
+          score        — relevance score (higher = better match)
+          usage_count  — how many published entries currently use this tag
+
+        An empty-corpus org or content with no matching tags returns
+        ``{"suggestions": []}`` — not an error. Use this before creating
+        an entry to stay consistent with the org's existing taxonomy.
+        """
+        return await api.post("/tags/suggest", json={
+            "content": content,
+            "limit": limit,
+        })
+
     # -------------------------------------------------------------------
     # Write tools
     # -------------------------------------------------------------------
