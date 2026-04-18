@@ -4,11 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from client import BrilliantClient
+
+# Locate the shared vault-walking helpers (`tools/vault_parse.py`). Used by
+# the `import_vault(path)` MCP tool so we don't duplicate the walker logic.
+# Search both the repo-root-relative `tools/` dir (local MCP run from the
+# repo) and the co-located `mcp/tools/` dir (if packaged alongside). If
+# neither is found, `import_vault` will raise a helpful error at call time
+# rather than breaking server startup.
+_MCP_DIR = Path(__file__).resolve().parent
+_CANDIDATE_TOOL_DIRS: list[Path] = [
+    _MCP_DIR.parent / "tools",  # repo-root layout
+    _MCP_DIR / "tools",         # packaged-alongside fallback
+]
+for _tool_dir in _CANDIDATE_TOOL_DIRS:
+    if (_tool_dir / "vault_parse.py").is_file() and str(_tool_dir) not in sys.path:
+        sys.path.insert(0, str(_tool_dir))
+        break
 
 
 def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
@@ -457,36 +474,130 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
     @mcp.tool()
     async def import_vault(
-        files: list[dict],
-        base_path: str = "",
-        source_vault: str = "vault",
+        path: str,
         preview_only: bool = False,
+        exclude: list[str] | None = None,
+        max_files: int = 500,
+        source_vault: str | None = None,
+        base_path: str | None = None,
     ) -> dict:
-        """Import markdown files into the knowledge base from a vault.
+        """Import an Obsidian (or plain markdown) vault in a single call.
 
-        Supports preview mode (dry-run) to check for collisions before committing.
-        In execute mode, creates a tracked batch that can be rolled back.
+        The MCP server process walks the directory at `path`, collects every
+        `.md` file (skipping `.obsidian/**` and `.trash/**` by default), reads
+        the contents, then POSTs the batch to `/import` (or `/import/preview`
+        if `preview_only=True`). The server handles YAML frontmatter parsing,
+        wikilink / markdown-link extraction into `entry_links`, collision
+        detection, and batch tracking.
 
-        Each file dict must have 'filename' (str) and 'content' (str) keys.
+        Parameters:
+          path           — absolute filesystem path to a vault directory the
+                           MCP server process can read directly. For
+                           Docker-hosted MCP the path must live on a
+                           bind-mounted volume (same caveat as
+                           `upload_attachment`).
+          preview_only   — when True, routes to `/import/preview` and returns
+                           the collision report without writing anything.
+          exclude        — additional glob patterns (relative to `path`) to
+                           skip; always merged with `.obsidian/**` and
+                           `.trash/**`.
+          max_files      — safety limit; if the walk turns up more than this
+                           many `.md` files, the tool returns an error dict
+                           without sending anything to the API.
+          source_vault   — provenance identifier stored on the import batch;
+                           defaults to the vault directory name.
+          base_path      — logical_path prefix applied to every file;
+                           defaults to the vault directory name.
 
-        Set preview_only=True to analyze without importing. Returns collision
-        report, type mappings, and projected counts.
-
-        Set preview_only=False (default) to execute the import with batch tracking.
-        Returns batch_id for potential rollback via rollback_import.
+        Returns the server response from `/import` (containing `batch_id`,
+        counts, and error list) or `/import/preview` (collision report).
+        On client-side errors (bad path, nothing to import, exceeds
+        max_files) returns `{"error": True, "detail": "..."}` without
+        touching the server.
         """
+        try:
+            from vault_parse import (  # type: ignore
+                build_payloads,
+                collect_md_files,
+                resolve_exclude_patterns,
+            )
+        except ImportError as exc:
+            return {
+                "error": True,
+                "detail": (
+                    "Shared vault walker not found on MCP server. Expected "
+                    "`tools/vault_parse.py` to be importable. "
+                    f"({exc})"
+                ),
+            }
+
+        vault_path = Path(path).expanduser().resolve()
+        if not vault_path.is_dir():
+            return {
+                "error": True,
+                "detail": f"Vault path does not exist or is not a directory: {vault_path}",
+            }
+
+        vault_name = vault_path.name
+        effective_base = base_path if base_path is not None else vault_name
+        effective_source = source_vault if source_vault is not None else vault_name
+
+        exclude_patterns = resolve_exclude_patterns(exclude)
+
+        # Walk in a thread so we don't block the event loop on large vaults.
+        md_files = await asyncio.to_thread(collect_md_files, vault_path, exclude_patterns)
+
+        if not md_files:
+            return {
+                "error": False,
+                "files_analyzed": 0,
+                "detail": "No .md files found under the vault path (after excludes).",
+            }
+
+        if len(md_files) > max_files:
+            return {
+                "error": True,
+                "detail": (
+                    f"Found {len(md_files)} files, which exceeds max_files={max_files}. "
+                    f"Increase max_files or add exclude patterns to reduce the file count."
+                ),
+            }
+
+        payloads, read_errors = await asyncio.to_thread(build_payloads, vault_path, md_files)
+
+        if not payloads:
+            return {
+                "error": True,
+                "detail": "No readable .md files in vault.",
+                "read_errors": read_errors,
+            }
+
         if preview_only:
-            return await api.post("/import/preview", json={
-                "files": files,
-                "base_path": base_path,
-            })
+            response = await api.post(
+                "/import/preview",
+                json={
+                    "files": payloads,
+                    "base_path": effective_base,
+                },
+            )
         else:
-            return await api.post("/import", json={
-                "files": files,
-                "base_path": base_path,
-                "source_vault": source_vault,
-                "collisions": [],
-            })
+            response = await api.post(
+                "/import",
+                json={
+                    "files": payloads,
+                    "base_path": effective_base,
+                    "source_vault": effective_source,
+                    "collisions": [],
+                },
+            )
+
+        # Surface client-side read errors alongside the server response so
+        # callers see everything that went wrong in one payload.
+        if read_errors and isinstance(response, dict):
+            existing = response.get("errors") or []
+            response["errors"] = list(existing) + read_errors
+
+        return response
 
     @mcp.tool()
     async def rollback_import(batch_id: str) -> dict:

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,6 +10,12 @@ from psycopg.rows import dict_row
 
 from auth import UserContext, get_current_user
 from database import get_db
+from services.frontmatter import (
+    build_domain_meta,
+    extract_governance_fields,
+    extract_title,
+    parse_frontmatter,
+)
 from services.links import sync_entry_links
 from models import (
     ImportFile,
@@ -22,6 +29,8 @@ from models import (
     ImportBatchResponse,
     RollbackResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["import"])
 
@@ -57,70 +66,9 @@ def infer_content_type(logical_path: str) -> str:
     return "context"
 
 
-def parse_frontmatter(content: str) -> tuple[dict, str]:
-    """Extract YAML-like frontmatter and return (meta, remaining_content).
-
-    Handles simple key: value pairs as well as YAML list syntax:
-    - Inline lists: tags: [a, b, c]
-    - Multi-line lists:
-        tags:
-          - a
-          - b
-          - c
-    """
-    if not content.startswith("---\n"):
-        return {}, content
-    end = content.find("\n---", 3)
-    if end == -1:
-        return {}, content
-    meta: dict = {}
-    lines = content[4:end].split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if ":" in line:
-            key, _, val = line.partition(":")
-            key = key.strip()
-            val = val.strip()
-            # Check for inline list: [a, b, c]
-            if val.startswith("[") and val.endswith("]"):
-                inner = val[1:-1]
-                meta[key] = [
-                    item.strip().strip('"').strip("'")
-                    for item in inner.split(",")
-                    if item.strip()
-                ]
-            elif val == "":
-                # Possibly a multi-line list; collect subsequent "  - item" lines
-                items = []
-                while i + 1 < len(lines):
-                    next_line = lines[i + 1]
-                    stripped = next_line.strip()
-                    if stripped.startswith("- "):
-                        items.append(stripped[2:].strip().strip('"').strip("'"))
-                        i += 1
-                    else:
-                        break
-                if items:
-                    meta[key] = items
-                else:
-                    meta[key] = val
-            else:
-                meta[key] = val
-        i += 1
-    return meta, content[end + 4 :].lstrip("\n")
-
-
-def extract_title(content: str, filename: str) -> str:
-    """Extract title from the first # heading, or fall back to filename without .md."""
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("# ") and not stripped.startswith("## "):
-            return stripped[2:].strip()
-    # Fallback: filename without .md extension
-    if filename.lower().endswith(".md"):
-        return filename[:-3]
-    return filename
+# parse_frontmatter / extract_title / extract_governance_fields /
+# build_domain_meta live in services/frontmatter (pure-python, unit-testable
+# without DB setup) and are imported at the top of this module.
 
 
 def extract_tags(meta: dict, content: str) -> list[str]:
@@ -156,22 +104,35 @@ def _build_logical_path(filename: str, base_path: str) -> str:
 def _parse_file(file: ImportFile, base_path: str) -> dict:
     """Parse a single import file and return extracted data dict.
 
-    Returns dict with keys: filename, title, content, remaining_content, meta,
-    tags, logical_path, content_hash, wiki_targets.
+    The persisted ``content`` is the frontmatter-stripped body. `_WIKI_LINK_RE`
+    still runs over that stripped body (frontmatter-embedded `[[...]]` would
+    be spurious link rows).
+
+    Returns a dict with keys: filename, title, content (stripped),
+    remaining_content (same as content, kept for back-compat), meta, tags,
+    governance (sensitivity/content_type/department/summary overrides),
+    domain_meta, logical_path, content_hash, wiki_targets.
     """
     meta, remaining_content = parse_frontmatter(file.content)
-    title = extract_title(remaining_content, file.filename)
+    title = extract_title(remaining_content, file.filename, meta)
     tags = extract_tags(meta, remaining_content)
+    governance = extract_governance_fields(meta)
+    domain_meta = build_domain_meta(meta)
     logical_path = _build_logical_path(file.filename, base_path)
-    content_hash = hashlib.sha256(file.content.encode()).hexdigest()
-    wiki_targets = _WIKI_LINK_RE.findall(file.content)
+    # Hash the stripped content so frontmatter edits that only touch
+    # structural fields (title, tags, sensitivity) don't mask a true
+    # body-level content collision.
+    content_hash = hashlib.sha256(remaining_content.encode()).hexdigest()
+    wiki_targets = _WIKI_LINK_RE.findall(remaining_content)
     return {
         "filename": file.filename,
         "title": title,
-        "content": file.content,
+        "content": remaining_content,
         "remaining_content": remaining_content,
         "meta": meta,
         "tags": tags,
+        "governance": governance,
+        "domain_meta": domain_meta,
         "logical_path": logical_path,
         "content_hash": content_hash,
         "wiki_targets": wiki_targets,
@@ -269,8 +230,9 @@ async def _resolve_content_type(conn, meta: dict, filename: str, logical_path: s
     """Resolve content_type from frontmatter, registry, daily note pattern, or path inference.
 
     Returns (content_type, type_mapping_or_None, unrecognized_type_or_None).
+    Accepts both `content_type` (preferred, #25) and the legacy `type` alias.
     """
-    raw_type = meta.get("type", "")
+    raw_type = meta.get("content_type", "") or meta.get("type", "")
     if isinstance(raw_type, list):
         raw_type = raw_type[0] if raw_type else ""
     raw_type = str(raw_type).strip()
@@ -466,12 +428,19 @@ async def import_files(
                         skipped += 1
                         continue
 
-                # Parse file
+                # Parse file (frontmatter stripped; governance + domain_meta
+                # split out; content_hash computed over the stripped body).
                 fd = _parse_file(file, body.base_path)
                 logical_path = fd["logical_path"]
                 title = fd["title"]
                 tags = fd["tags"]
                 meta = fd["meta"]
+                governance = fd["governance"]
+                domain_meta = fd["domain_meta"]
+                # `stripped_content` is the persisted body — frontmatter is
+                # removed upstream so downstream render/search/link paths see
+                # only the user-authored markdown (#25).
+                stripped_content = fd["content"]
                 content_hash = fd["content_hash"]
                 wiki_targets = fd["wiki_targets"]
 
@@ -492,7 +461,7 @@ async def import_files(
                              AND org_id = %(org_id)s""",
                         {
                             "separator": "\n\n",
-                            "new_content": file.content,
+                            "new_content": stripped_content,
                             "content_hash": content_hash,
                             "updated_by": user.id,
                             "entry_id": collision.existing_entry_id,
@@ -502,19 +471,39 @@ async def import_files(
                     created += 1  # count as processed
                     continue
 
-                # Resolve content_type
-                content_type, mapping, unrec = await _resolve_content_type(
-                    conn, meta, file.filename, logical_path
-                )
-                if mapping:
-                    type_mappings[mapping[0]] = mapping[1]
-                if unrec:
-                    unrecognized_types.add(unrec)
+                # Resolve content_type (frontmatter governance wins over
+                # registry/inference when it already validated).
+                if "content_type" in governance:
+                    content_type = governance["content_type"]
+                else:
+                    content_type, mapping, unrec = await _resolve_content_type(
+                        conn, meta, file.filename, logical_path
+                    )
+                    if mapping:
+                        type_mappings[mapping[0]] = mapping[1]
+                    if unrec:
+                        unrecognized_types.add(unrec)
+
+                # Sensitivity / department / summary come from frontmatter
+                # when provided; otherwise fall back to existing defaults.
+                sensitivity = governance.get("sensitivity", "shared")
+                department = governance.get("department", user.department)
+                summary = governance.get("summary")
 
                 if use_staging:
-                    # Build proposed_meta including tags
-                    proposed_meta = dict(meta) if meta else {}
+                    # Build proposed_meta including governance + tags. The
+                    # staging approver promotes these back onto the entry on
+                    # accept, so include the full frontmatter echo here.
+                    proposed_meta = dict(domain_meta) if domain_meta else {}
                     proposed_meta["tags"] = tags
+                    if "sensitivity" in governance:
+                        proposed_meta["sensitivity"] = governance["sensitivity"]
+                    if "content_type" in governance:
+                        proposed_meta["content_type"] = governance["content_type"]
+                    if "department" in governance:
+                        proposed_meta["department"] = governance["department"]
+                    if "summary" in governance:
+                        proposed_meta["summary"] = governance["summary"]
 
                     # Route to staging table
                     await conn.execute(
@@ -536,7 +525,7 @@ async def import_files(
                             "target_path": logical_path,
                             "change_type": "create",
                             "proposed_title": title,
-                            "proposed_content": file.content,
+                            "proposed_content": stripped_content,
                             "proposed_meta": json.dumps(proposed_meta),
                             "content_hash": content_hash,
                             "submitted_by": user.id,
@@ -569,16 +558,16 @@ async def import_files(
                         {
                             "org_id": user.org_id,
                             "title": title,
-                            "content": file.content,
-                            "summary": None,
+                            "content": stripped_content,
+                            "summary": summary,
                             "content_hash": content_hash,
                             "content_type": content_type,
                             "logical_path": logical_path,
-                            "sensitivity": "shared",
-                            "department": user.department,
+                            "sensitivity": sensitivity,
+                            "department": department,
                             "owner_id": user.id,
                             "tags": tags,
-                            "domain_meta": json.dumps(meta) if meta else "{}",
+                            "domain_meta": json.dumps(domain_meta) if domain_meta else "{}",
                             "source": user.source,
                             "created_by": user.id,
                             "updated_by": user.id,
@@ -590,10 +579,13 @@ async def import_files(
                     entry_id = str(row["id"])
                     created += 1
 
-                    # Defer link resolution until all inserts complete so that
-                    # targets created later in this batch are resolvable.
+                    # Defer link resolution until all inserts complete so
+                    # that targets created later in this batch are
+                    # resolvable. We hand the *stripped* content to
+                    # sync_entry_links so frontmatter-embedded links don't
+                    # count as entry_links rows.
                     if wiki_targets:
-                        pending_links.append((entry_id, file.content))
+                        pending_links.append((entry_id, stripped_content))
 
             except Exception as exc:
                 errors.append(f"{file.filename}: {str(exc)}")

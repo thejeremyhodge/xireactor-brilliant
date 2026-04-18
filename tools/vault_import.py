@@ -12,12 +12,9 @@ Dependencies: Python 3.8+ stdlib + requests
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
-import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 try:
     import requests
@@ -25,67 +22,17 @@ except ImportError:
     print("Error: 'requests' library is required. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
 
-
-def collect_md_files(vault_path: Path, exclude_patterns: list[str]) -> list[Path]:
-    """Walk vault directory and collect .md files, skipping excluded patterns."""
-    md_files = []
-    for root, dirs, files in os.walk(vault_path):
-        rel_root = Path(root).relative_to(vault_path)
-
-        # Check if this directory should be excluded
-        skip_dir = False
-        for pattern in exclude_patterns:
-            # Match directory path against glob patterns
-            dir_str = str(rel_root)
-            if fnmatch.fnmatch(dir_str, pattern.rstrip("/*").rstrip("/**")):
-                skip_dir = True
-                break
-            if fnmatch.fnmatch(dir_str + "/", pattern):
-                skip_dir = True
-                break
-
-        if skip_dir:
-            dirs.clear()  # Don't descend into excluded directories
-            continue
-
-        for filename in sorted(files):
-            if not filename.endswith(".md"):
-                continue
-
-            rel_path = rel_root / filename
-            rel_path_str = str(rel_path)
-
-            # Check file-level excludes
-            excluded = False
-            for pattern in exclude_patterns:
-                if fnmatch.fnmatch(rel_path_str, pattern):
-                    excluded = True
-                    break
-            if excluded:
-                continue
-
-            md_files.append(rel_path)
-
-    return sorted(md_files)
-
-
-def build_payloads(vault_path: Path, md_files: list[Path]) -> tuple[list[dict], list[str]]:
-    """Read file contents and build payload objects. Returns (payloads, errors)."""
-    payloads = []
-    errors = []
-
-    for rel_path in md_files:
-        full_path = vault_path / rel_path
-        try:
-            content = full_path.read_text(encoding="utf-8")
-            payloads.append({
-                "filename": str(rel_path),
-                "content": content,
-            })
-        except (OSError, UnicodeDecodeError) as e:
-            errors.append(f"Failed to read {rel_path}: {e}")
-
-    return payloads, errors
+# Re-export the shared helpers so existing imports of
+# `from vault_import import collect_md_files, build_payloads` still work.
+# The logic lives in `vault_parse` so the MCP tool (`mcp/tools.py`) can use
+# the same walker without shelling out to this CLI module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vault_parse import (  # noqa: E402
+    DEFAULT_EXCLUDES,
+    build_payloads,
+    collect_md_files,
+    resolve_exclude_patterns,
+)
 
 
 def preview_import(api_url: str, api_key: str, files: list[dict], base_path: str) -> None:
@@ -271,13 +218,7 @@ def main(argv: list[str] | None = None) -> None:
     source_vault = args.source_vault or vault_name
 
     # Build exclude patterns with defaults
-    exclude_patterns = args.exclude if args.exclude else [".obsidian/**", ".trash/**"]
-
-    # Always exclude these regardless of user input
-    default_excludes = {".obsidian/**", ".trash/**"}
-    for pat in default_excludes:
-        if pat not in exclude_patterns:
-            exclude_patterns.append(pat)
+    exclude_patterns = resolve_exclude_patterns(args.exclude)
 
     print(f"Scanning vault: {vault_path}")
     print(f"Base path:      {base_path}")
