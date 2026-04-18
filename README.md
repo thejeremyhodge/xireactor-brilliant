@@ -1,7 +1,34 @@
-# xiReactor Brilliant
+<p align="center">
+  <img src=".github/assets/logo.svg" width="140" alt="Brilliant logo" />
+</p>
 
-**v0.3.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+<h1 align="center">xiReactor Brilliant</h1>
 
+<p align="center">
+  <strong>Shared context that compounds.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/thejeremyhodge/xireactor-brilliant/releases"><img src="https://img.shields.io/github/v/release/thejeremyhodge/xireactor-brilliant?style=flat&color=4558c9&label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/thejeremyhodge/xireactor-brilliant?style=flat" alt="License"></a>
+  <a href="https://github.com/thejeremyhodge/xireactor-brilliant/actions/workflows/installer-smoke.yml"><img src="https://img.shields.io/github/actions/workflow/status/thejeremyhodge/xireactor-brilliant/installer-smoke.yml?branch=main&style=flat&label=installer%20smoke" alt="Installer smoke test"></a>
+  <a href="https://github.com/thejeremyhodge/xireactor-brilliant/commits/main"><img src="https://img.shields.io/github/last-commit/thejeremyhodge/xireactor-brilliant?style=flat" alt="Last commit"></a>
+  <a href="https://github.com/thejeremyhodge/xireactor-brilliant/stargazers"><img src="https://img.shields.io/github/stars/thejeremyhodge/xireactor-brilliant?style=flat&color=yellow" alt="Stars"></a>
+</p>
+
+<p align="center">
+  <a href="#what-it-is">What It Is</a> •
+  <a href="#getting-started">Get Started</a> •
+  <a href="ARCHITECTURE.md">Architecture</a> •
+  <a href="mcp/README.md">MCP</a> •
+  <a href="ROADMAP.md">Roadmap</a> •
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+---
+
+> **v0.3.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+>
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent
 > access via MCP, and tiered governance.
