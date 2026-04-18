@@ -84,7 +84,7 @@ Your API key is provided automatically through the MCP connection. Your key type
 - **Agent keys** (`agent` source): all writes routed through the staging/governance pipeline — use `submit_staging`
 - **API integration keys** (`api` source): same as interactive
 
-Check your key type from the `session_init` response at session start.
+Check your key type from `manifest.user.source` in the `session_init` response at session start.
 
 ## Invite Onboarding
 
@@ -125,23 +125,44 @@ If unclear, show this table and ask what they need.
 
 At the beginning of every conversation, initialize your KB context:
 
-1. **Call `session_init`** — returns a pre-assembled context bundle:
-   - Auto-scaled index depth (L4 for small KBs, L2 for large)
-   - System entries — user-authored rules/conventions under `System/*` (may be empty on a fresh org). The content-type registry is served separately via `get_types`, not bundled here.
-   - KB metadata (total entries, last updated, your role)
-   - `pending_reviews` — `{ count, items[] (top 5 tier ≥ 3), review_url }`. **If `count > 0` on resume, surface this in the standup briefing unconditionally — the user should not have to ask.**
+1. **Call `session_init`** — returns a compact `manifest` object (~≤ 2K tokens regardless of KB size). The manifest tells you WHAT exists and WHERE to look; it does NOT inline full content or the relationship graph.
 
-2. **Internalize the bundle.** You now know:
-   - What topics the KB covers and how much content exists
-   - Every document title and where it lives (at appropriate depth)
-   - How documents relate to each other
-   - What content types are available (query the registry with `get_types`)
+   ```json
+   {
+     "manifest": {
+       "total_entries": 487,
+       "last_updated": "2026-04-18T09:12:00+00:00",
+       "user": { "id": "...", "display_name": "...", "role": "admin", "source": "web_ui" },
+       "categories":   [ { "content_type": "context", "count": 52 }, ... ],
+       "top_paths":    [ { "logical_path_prefix": "Projects", "count": 128 }, ... ],
+       "system_entries": [ { "id": "...", "title": "System: RLS Policies", "logical_path": "System/rls-policies" } ],
+       "pending_reviews": { "count": 2, "items": [ ... ], "review_url": "/staging?status=pending&tier_gte=3" },
+       "hints": [
+         "call get_index(depth=3, path='Projects/') to see titles and relationships under 'Projects/'",
+         "call search_entries(q=...) for keyword lookup; get_entry(id) for full content"
+       ]
+     }
+   }
+   ```
 
-3. **Check your key type** from `metadata.user.source`:
+2. **Internalize the manifest.** You now know:
+   - How many entries exist and when the KB was last updated
+   - Which content types dominate (`categories`) and which top-level path buckets to drill into (`top_paths`)
+   - Which system rules exist (titles + logical_path only — fetch content on demand)
+   - Whether Tier 3+ governance items are waiting (`pending_reviews.count`)
+
+3. **Check your key type** from `manifest.user.source`:
    - If `agent`: all creates/updates go through `submit_staging`
    - If `web_ui` or `api`: you can write directly with `create_entry`, `update_entry`, `append_entry`
 
-4. **Use the index to answer questions before fetching full content.** When the user asks "what do we know about X?", check the index first. Only fetch full content (`get_entry`) when you need the actual text.
+4. **Drill down instead of dumping.** The manifest deliberately omits full content. When you need more detail:
+   - `get_index(depth=3, path='Projects/')` — titles + relationships under a path bucket
+   - `get_index(depth=4, content_type='decision')` — summaries for a slice
+   - `search_entries(q='...')` — keyword lookup across the KB
+   - `get_entry(id)` — full content of a single entry (including any `system_entries[].id` you want to read)
+   - `get_neighbors(id, depth=2)` — graph traversal from a known entry
+
+   The `manifest.hints` array surfaces suggested next calls. Follow them when they fit the user's intent.
 
 ---
 
@@ -151,25 +172,25 @@ Reconstruct context so the user picks up where they left off.
 
 ### Steps
 
-1. **Call `session_init`** to load the current KB state
+1. **Call `session_init`** to load the current manifest
 2. **Find recent daily notes** — `search_entries(content_type="daily", limit=3)` to get recent session logs
 3. **Read the latest daily note** — `get_entry` on the most recent result to see what was discussed
-4. **Read `session_init.pending_reviews`** — no extra call needed; it was returned with the bundle. If `count > 0`, include the items in the briefing without being asked.
+4. **Read `manifest.pending_reviews`** — no extra call needed; it was returned with the manifest. If `count > 0`, include the items in the briefing without being asked.
 5. **Present a briefing** — concise standup format:
 
 ```
 Welcome back.
 
-**KB Status**: [N entries, last updated timestamp]
+**KB Status**: [manifest.total_entries entries, last updated manifest.last_updated]
 **Last session** ([date]): [Brief summary from daily note]
-**Pending reviews**: [pending_reviews.count items awaiting review — list top 3 from pending_reviews.items with target_path + change_type + age_hours, link to pending_reviews.review_url]
+**Pending reviews**: [manifest.pending_reviews.count items awaiting review — list top 3 from manifest.pending_reviews.items with target_path + change_type + age_hours, link to manifest.pending_reviews.review_url]
 **Inbox**: [N files waiting in inbox/ — see Brilliant-Anchor Workflow]
 **Recent activity**: [New entries or updates since last session]
 
 What would you like to focus on?
 ```
 
-Only omit the **Pending reviews** line when `pending_reviews.count == 0`.
+Only omit the **Pending reviews** line when `manifest.pending_reviews.count == 0`.
 
 6. **Create or append today's daily note** — see [Daily Notes](#daily-notes)
 
@@ -530,13 +551,13 @@ Beyond org-wide roles, admins and entry owners can grant per-entry or per-path a
 - The index and search automatically filter to entries you can see
 - A 404 may mean the entry exists but is outside your permission scope
 - Your `source` tag is set automatically — you don't need to specify it
-- Check `metadata.user.role` from `session_init` to know your capabilities
+- Check `manifest.user.role` from `session_init` to know your capabilities
 
 ---
 
 ## Content Type Awareness
 
-The content-type registry lives in its own table and is fetched via `get_types` (it is NOT carried in `session_init.system_entries`). Use it to:
+The content-type registry lives in its own table and is fetched via `get_types` (it is NOT carried in `manifest.system_entries`, which only holds user-authored `content_type=system` rule entries). Use it to:
 
 1. **Validate content types** before creating entries — only use canonical types
 2. **Suggest types** when the user is unsure — show available types from the registry

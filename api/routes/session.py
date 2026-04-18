@@ -1,4 +1,27 @@
-"""Session initialization endpoint — context bundle for agent session start."""
+"""Session initialization endpoint — density manifest for agent session start.
+
+Returns a compact manifest (~≤ 2K tokens) instead of the full tiered index.
+The agent is expected to drill down with `get_index(depth=N, path=...)`,
+`search_entries`, and `get_entry` once it has seen the manifest. The old
+payload inlined every entry, every relationship, every summary, and the
+full content of every `system` entry — that routinely ballooned past 40K
+tokens on real-sized KBs and broke Claude Code sessions.
+
+New shape (v0.4.0 breaking change):
+
+    {
+      "manifest": {
+        "total_entries": <int>,
+        "last_updated":  <iso8601 | null>,
+        "user": {id, display_name, role, department, source},
+        "categories":    [{content_type, count}, ...],
+        "top_paths":     [{logical_path_prefix, count}, ...],   # up to 15
+        "system_entries":[{id, title, logical_path}, ...],       # no content
+        "pending_reviews": {count, items[0..5], review_url},
+        "hints": ["call get_index(depth=3, path='Projects/') ...", ...]
+      }
+    }
+"""
 
 from datetime import datetime, timezone
 
@@ -10,39 +33,36 @@ from database import get_db
 
 router = APIRouter(tags=["session"])
 
+# Hard cap on top_paths rows — the agent can walk past the horizon with
+# get_index(path=...), so there is no value in dumping the long tail here.
+TOP_PATHS_LIMIT = 15
+
 
 @router.get("")
 async def session_init(
     user: UserContext = Depends(get_current_user),
 ):
-    """Return a pre-assembled context bundle for agent session start.
+    """Return a compact density manifest for agent session start.
 
-    Dynamically selects index depth based on KB size:
-    - <=50 entries  -> L4 (summaries)
-    - <=500 entries -> L3 (relationships)
-    - <=5000 entries -> L2 (document index)
-    - >5000 entries -> L1 (category counts only)
+    The manifest is designed to fit under ~2K tokens regardless of KB size:
+    it carries counts, top-level path buckets, system-entry handles, and
+    pending-review previews. Full entry content, summaries, and the
+    relationship graph are intentionally excluded — the agent drills down
+    via `get_index(depth=N, path=...)`, `search_entries`, and `get_entry`.
 
-    Always includes system entries and KB metadata.
+    A fresh org with zero published entries returns a well-formed manifest
+    with zeroed counts and empty lists, not a crash.
     """
     async with get_db(user) as conn:
-        # Count total entries
+        # -------- counts + last_updated ---------------------------------
         cur = await conn.execute(
-            "SELECT COUNT(*) FROM entries WHERE status = 'published'"
+            "SELECT COUNT(*), MAX(updated_at) FROM entries WHERE status = 'published'"
         )
-        total = (await cur.fetchone())[0]
+        row = await cur.fetchone()
+        total = row[0] or 0
+        last_updated = row[1].isoformat() if row[1] else None
 
-        # Select depth based on size
-        if total <= 50:
-            depth = 4
-        elif total <= 500:
-            depth = 3
-        elif total <= 5000:
-            depth = 2
-        else:
-            depth = 1
-
-        # Get category counts (L1 — always)
+        # -------- category counts ---------------------------------------
         cur = await conn.execute(
             """
             SELECT content_type, count(*) AS count
@@ -53,86 +73,55 @@ async def session_init(
         cur.row_factory = dict_row
         categories = await cur.fetchall()
 
-        # Build index based on depth
-        index = {
-            "depth": depth,
-            "total_entries": total,
-            "categories": categories,
-        }
-
-        if depth >= 2:
-            # L2: document index
-            if depth >= 4:
-                select = "id, title, content_type, logical_path, summary, updated_at"
-            else:
-                select = "id, title, content_type, logical_path, updated_at"
-
-            cur = await conn.execute(
-                f"""
-                SELECT {select}
-                FROM entries WHERE status = 'published'
-                ORDER BY logical_path
-                """
-            )
-            cur.row_factory = dict_row
-            entries = await cur.fetchall()
-
-            # Convert UUIDs to strings
-            index["entries"] = [
-                {**e, "id": str(e["id"]), "updated_at": e["updated_at"].isoformat()}
-                for e in entries
-            ]
-
-            if depth >= 4:
-                index["summaries"] = {
-                    str(e["id"]): e.get("summary") or "" for e in entries
-                }
-
-        if depth >= 3:
-            # L3: relationships
-            cur = await conn.execute(
-                """
-                SELECT el.source_entry_id, el.target_entry_id, el.link_type
-                FROM entry_links el
-                JOIN entries e1 ON e1.id = el.source_entry_id AND e1.status = 'published'
-                JOIN entries e2 ON e2.id = el.target_entry_id AND e2.status = 'published'
-                """
-            )
-            cur.row_factory = dict_row
-            links = await cur.fetchall()
-            index["relationships"] = [
-                {
-                    "source_id": str(r["source_entry_id"]),
-                    "target_id": str(r["target_entry_id"]),
-                    "link_type": r["link_type"],
-                }
-                for r in links
-            ]
-
-        # Always include user-authored system entries (rules, conventions under System/*).
-        # NOTE: the content-type registry is NOT here — it lives in its own table (see /types).
+        # -------- top-level logical_path buckets ------------------------
+        # Bucket by first path segment (everything up to the first '/').
+        # Entries with no slash bucket under their full logical_path.
+        # Ordered by count desc, capped at TOP_PATHS_LIMIT.
         cur = await conn.execute(
             """
-            SELECT id, title, content, content_type, logical_path
+            SELECT
+              CASE
+                WHEN position('/' IN logical_path) > 0
+                  THEN split_part(logical_path, '/', 1)
+                ELSE logical_path
+              END AS prefix,
+              count(*) AS count
+            FROM entries
+            WHERE status = 'published' AND logical_path IS NOT NULL
+            GROUP BY prefix
+            ORDER BY count DESC, prefix ASC
+            LIMIT %s
+            """,
+            (TOP_PATHS_LIMIT,),
+        )
+        cur.row_factory = dict_row
+        top_path_rows = await cur.fetchall()
+        top_paths = [
+            {"logical_path_prefix": r["prefix"], "count": r["count"]}
+            for r in top_path_rows
+        ]
+
+        # -------- system entries (handles only, no content) -------------
+        cur = await conn.execute(
+            """
+            SELECT id, title, logical_path
             FROM entries
             WHERE status = 'published' AND content_type = 'system'
             ORDER BY logical_path
             """
         )
         cur.row_factory = dict_row
-        system_entries = await cur.fetchall()
-        system = [
-            {**e, "id": str(e["id"])} for e in system_entries
+        system_rows = await cur.fetchall()
+        system_entries = [
+            {
+                "id": str(r["id"]),
+                "title": r["title"],
+                "logical_path": r["logical_path"],
+            }
+            for r in system_rows
         ]
 
-        # Get last updated timestamp
-        cur = await conn.execute(
-            "SELECT MAX(updated_at) FROM entries WHERE status = 'published'"
-        )
-        last_updated_row = await cur.fetchone()
-        last_updated = last_updated_row[0].isoformat() if last_updated_row[0] else None
-
-        # Query pending Tier 3+ staging items for escalation preamble
+        # -------- pending reviews (unchanged from prior shape) ----------
         cur = await conn.execute(
             """
             SELECT id, target_path, change_type, submission_category,
@@ -169,11 +158,11 @@ async def session_init(
             "review_url": "/staging?status=pending&tier_gte=3",
         }
 
+        # -------- hints -------------------------------------------------
+        hints = _build_hints(total, top_paths, system_entries, pending_reviews)
+
         return {
-            "index": index,
-            "system_entries": system,
-            "pending_reviews": pending_reviews,
-            "metadata": {
+            "manifest": {
                 "total_entries": total,
                 "last_updated": last_updated,
                 "user": {
@@ -183,5 +172,52 @@ async def session_init(
                     "department": user.department,
                     "source": user.source,
                 },
-            },
+                "categories": categories,
+                "top_paths": top_paths,
+                "system_entries": system_entries,
+                "pending_reviews": pending_reviews,
+                "hints": hints,
+            }
         }
+
+
+def _build_hints(
+    total: int,
+    top_paths: list[dict],
+    system_entries: list[dict],
+    pending_reviews: dict,
+) -> list[str]:
+    """Produce a short, budgeted list of drill-down suggestions.
+
+    Hints are strings (not structured actions) so the agent sees them
+    inline with the manifest. Keep each hint under one sentence.
+    """
+    hints: list[str] = []
+
+    if total == 0:
+        hints.append(
+            "KB is empty — create entries with create_entry or import a vault via import_vault."
+        )
+        return hints
+
+    if top_paths:
+        first = top_paths[0]["logical_path_prefix"]
+        hints.append(
+            f"call get_index(depth=3, path='{first}/') to see titles and relationships under '{first}/'"
+        )
+
+    hints.append(
+        "call search_entries(q=...) for keyword lookup; get_entry(id) for full content"
+    )
+
+    if system_entries:
+        hints.append(
+            "read system rules with get_entry(id) on manifest.system_entries — content is omitted here"
+        )
+
+    if pending_reviews.get("count", 0) > 0:
+        hints.append(
+            "surface manifest.pending_reviews in your standup — there are Tier 3+ items awaiting review"
+        )
+
+    return hints

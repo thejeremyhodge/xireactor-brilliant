@@ -67,85 +67,73 @@ curl -s http://localhost:8010/health
 
 **`GET /session-init`**
 
-Returns a pre-assembled context bundle for agent session start. Dynamically selects index depth based on KB size. Includes a `pending_reviews` section that surfaces Tier 3+ governance items awaiting human review, scoped to the caller's organization. The `count` field gives the total (up to 20), `items` previews the top 5 with age, and `review_url` links to the full filtered staging list.
+Returns a compact density **manifest** for agent session start — budgeted to ~≤ 2K tokens regardless of KB size. The manifest carries counts, top-level path buckets, system-entry handles, and pending-review previews. Full entry content, summaries, and the relationship graph are intentionally excluded — drill down with `GET /index?depth=N&path=...`, `GET /entries?q=...`, and `GET /entries/{id}`.
+
+**Breaking change in v0.4.0:** the response shape changed from `{ index, system_entries, pending_reviews, metadata }` to `{ manifest: { ... } }`. System entries no longer carry `content` — fetch with `GET /entries/{id}` when needed.
 
 ```bash
 curl -s http://localhost:8010/session-init \
   -H "Authorization: Bearer bkai_adm1_testkey_admin"
 ```
 
-**Depth selection:**
-
-| Total Entries | Index Depth |
-|---|---|
-| ≤50 | L4 (summaries) |
-| ≤500 | L3 (relationships) |
-| ≤5000 | L2 (document index) |
-| >5000 | L1 (category counts) |
-
 **Response (200):**
 
 ```json
 {
-  "index": {
-    "depth": 4,
-    "total_entries": 15,
-    "categories": [
-      { "content_type": "context", "count": 5 },
-      ...
-    ],
-    "entries": [
-      {
-        "id": "a1b2c3d4-...",
-        "title": "Client Onboarding SOP",
-        "content_type": "resource",
-        "logical_path": "processes/onboarding/client-sop",
-        "summary": "Step-by-step process for onboarding...",
-        "updated_at": "2026-04-04T12:00:00"
-      },
-      ...
-    ],
-    "summaries": { "a1b2c3d4-...": "Step-by-step process..." },
-    "relationships": [
-      { "source_id": "...", "target_id": "...", "link_type": "relates_to" }
-    ]
-  },
-  "system_entries": [
-    {
-      "id": "...",
-      "title": "Type Registry",
-      "content": "...",
-      "content_type": "system",
-      "logical_path": "System/type-registry"
-    }
-  ],
-  "pending_reviews": {
-    "count": 2,
-    "items": [
-      {
-        "id": "...",
-        "target_path": "Projects/alpha/brief",
-        "change_type": "update",
-        "governance_tier": 3,
-        "submitted_by": "...",
-        "age_hours": 4.2
-      }
-    ],
-    "review_url": "/staging?status=pending&tier_gte=3"
-  },
-  "metadata": {
-    "total_entries": 15,
-    "last_updated": "2026-04-04T12:00:00",
+  "manifest": {
+    "total_entries": 487,
+    "last_updated": "2026-04-18T09:12:00+00:00",
     "user": {
-      "id": "...",
+      "id": "usr_admin",
       "display_name": "Admin User",
       "role": "admin",
       "department": null,
       "source": "web_ui"
-    }
+    },
+    "categories": [
+      { "content_type": "context", "count": 52 },
+      { "content_type": "decision", "count": 18 }
+    ],
+    "top_paths": [
+      { "logical_path_prefix": "Projects", "count": 128 },
+      { "logical_path_prefix": "Meetings", "count": 94 }
+    ],
+    "system_entries": [
+      {
+        "id": "a0000000-0000-0000-0000-000000000007",
+        "title": "System: RLS Policy Definitions",
+        "logical_path": "System/rls-policies"
+      }
+    ],
+    "pending_reviews": {
+      "count": 2,
+      "items": [
+        {
+          "id": "...",
+          "target_path": "Projects/alpha/brief",
+          "change_type": "update",
+          "governance_tier": 3,
+          "submitted_by": "...",
+          "age_hours": 4.2
+        }
+      ],
+      "review_url": "/staging?status=pending&tier_gte=3"
+    },
+    "hints": [
+      "call get_index(depth=3, path='Projects/') to see titles and relationships under 'Projects/'",
+      "call search_entries(q=...) for keyword lookup; get_entry(id) for full content"
+    ]
   }
 }
 ```
+
+**Drill-down endpoints referenced by the manifest:**
+
+- `GET /index?depth=3&path=Projects/` — titles + relationships under a path bucket
+- `GET /index?depth=4&content_type=decision` — summaries for a slice
+- `GET /entries?q=<term>` — keyword search (RLS-filtered)
+- `GET /entries/{id}` — full content of a single entry
+- `GET /entries/{id}/links?depth=2` — graph traversal from an entry
 
 ---
 

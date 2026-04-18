@@ -114,27 +114,36 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
     @mcp.tool()
     async def session_init() -> dict:
-        """Initialize an agent session with a pre-assembled context bundle.
+        """Initialize an agent session with a compact density manifest.
 
-        Returns a dynamically-scoped index (depth chosen by KB size),
-        any user-authored entries under System/* (rules, conventions,
-        org-wide agent behavior), metadata (total entries, last_updated,
-        user role summary), and pending_reviews. A fresh org with no
-        rules yet legitimately returns an empty system_entries array —
-        populate it by filing content_type=system entries under System/.
+        Returns a single `manifest` object budgeted to ~2K tokens regardless
+        of KB size. The manifest tells you WHAT exists and WHERE to look —
+        it intentionally does NOT carry full entry content, summaries, or
+        the relationship graph. Drill down with `get_index(depth=N, path=...)`,
+        `search_entries(q=...)`, and `get_entry(id)` once you know what you
+        need.
 
-        The content-type registry is NOT carried in system_entries —
-        it lives in its own table, queried via get_types.
+        Manifest fields:
+          total_entries   — total published entries visible to you (RLS-filtered)
+          last_updated    — ISO timestamp of the most recent entry update
+          user            — {id, display_name, role, department, source};
+                            check `source` to know whether you have an agent
+                            key (writes must go through submit_staging)
+          categories      — [{content_type, count}, ...] ordered by count desc
+          top_paths       — [{logical_path_prefix, count}, ...] top-level
+                            buckets (first path segment), capped at 15 rows.
+                            Use these prefixes as `path=` args to get_index.
+          system_entries  — [{id, title, logical_path}, ...] — HANDLES ONLY.
+                            Fetch full content with get_entry(id) when needed.
+                            A fresh org with no rules returns an empty array.
+          pending_reviews — {count, items[0..5], review_url}. If count > 0
+                            surface this in your standup unconditionally.
+          hints           — short list of suggested next tool calls
 
-        The pending_reviews section surfaces Tier 3+ governance items
-        awaiting human review, scoped to the caller's organization:
-          count      — total pending items (up to 20)
-          items      — preview of top 5 items with id, target_path,
-                       change_type, governance_tier, submitted_by, age_hours
-          review_url — API path to list all pending high-tier items
+        The content-type registry is NOT carried here — query via get_types.
 
-        Call this at the start of every conversation to load ambient
-        context and check for items requiring your attention.
+        Call this at the start of every conversation to load ambient context
+        and check for items requiring your attention.
         """
         return await api.get("/session-init")
 
