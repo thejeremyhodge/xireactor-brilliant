@@ -27,11 +27,18 @@
 
 ---
 
-> **v0.3.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+> **v0.4.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
 >
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent
 > access via MCP, and tiered governance.
+
+## New in v0.4.0
+
+- **`session_init` density manifest** — every Claude session now bootstraps on a compact ≤ 2K-token manifest instead of a ~46K-token index dump. Agents drill into paths/entries on demand via `get_index` / `get_entry` / `get_neighbors`. **Breaking** for anything that read `system_entries[].content` directly — see the CHANGELOG for the migration pattern.
+- **`import_vault(path)` MCP tool** — one MCP call imports an Obsidian (or plain markdown) vault by filesystem path. The server parses YAML frontmatter into entry fields (tags, sensitivity, content_type, department) and extracts `[[wikilinks]]` / markdown links into `entry_links`.
+- **Fuzzy search fallback** — `search_entries(q=..., fuzzy=true)` retries via `pg_trgm` word-similarity when the FTS path returns zero rows, so `"klaude"` still surfaces `"claude"` entries. Off by default; existing search behavior unchanged.
+- **`suggest_tags(content)` MCP tool** — deterministic, RLS-scoped ranking over the org's existing tag vocabulary. Use it when writing a new entry to reuse tags people are already searching by.
 
 ## What It Is
 

@@ -5,3 +5,5 @@ aiohttp>=3.9,<4
 pytest>=8.0,<9
 requests>=2.31,<3
 psycopg[binary]>=3.2,<4
+# Frontmatter parsing coverage (mirrors api/requirements.txt)
+PyYAML>=6.0,<7

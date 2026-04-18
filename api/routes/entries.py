@@ -206,11 +206,29 @@ async def list_entries(
     logical_path: str | None = Query(None, description="Filter by path prefix"),
     department: str | None = Query(None, description="Filter by department"),
     tag: str | None = Query(None, description="Filter by tag (array contains)"),
+    fuzzy: bool = Query(
+        False,
+        description=(
+            "When true AND the FTS query returns zero rows, retry with a "
+            "pg_trgm similarity fallback so near-misses (e.g. 'klaude' → "
+            "'claude') still surface results. Default false preserves "
+            "exact/FTS-only behavior."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     user: UserContext = Depends(get_current_user),
 ):
-    """List entries with optional full-text search and filters."""
+    """List entries with optional full-text search and filters.
+
+    When `q` is provided, results are ranked by FTS relevance. If `fuzzy=true`
+    AND the FTS path returns zero rows, we re-issue using pg_trgm's
+    `word_similarity()` (`<%` operator) against title+content ordered by
+    score DESC. The fallback is pure — no merging / re-ranking — which
+    keeps latency predictable and the behaviour obvious to callers. RLS
+    scoping is inherited from the surrounding `get_db(user)` session, so
+    fuzzy results respect the same visibility rules as exact search.
+    """
     conditions = []
     params: list = []
 
@@ -267,6 +285,72 @@ async def list_entries(
         cur = await conn.execute(data_query, data_params)
         cur.row_factory = dict_row
         rows = await cur.fetchall()
+
+        # ----------------------------------------------------------------
+        # Fuzzy fallback (pg_trgm).
+        #
+        # Only engage when ALL of the following hold:
+        #   * caller opted in via `fuzzy=true`
+        #   * caller provided a text query (`q` truthy)
+        #   * FTS returned zero rows on this page AND overall (total == 0)
+        #
+        # We keep the non-`q` filters (content_type / logical_path /
+        # department / tag) in WHERE and swap only the FTS predicate for
+        # a trigram *word* match — `<%` tests whether the query is similar
+        # to any word inside the haystack, which is what you want for a
+        # short typo matched against a multi-word title/content. Plain
+        # `%` against whole-row text dilutes similarity below any sane
+        # threshold for real-world entries (e.g.
+        # similarity('klaude', 'Working with claude test') = 0.15,
+        # word_similarity('klaude', 'Working with claude test') = 0.57).
+        #
+        # Threshold: 0.3 on `pg_trgm.word_similarity_threshold`. This is
+        # below the 0.6 default and above noise. Set via SET LOCAL so it
+        # dies with the transaction and does not poison pooled
+        # connections (same rule as SET LOCAL ROLE).
+        #
+        # Indexes: gin_trgm_ops supports both `%` and `<%`, so the GIN
+        # indexes on entries.title / entries.content (migration 026)
+        # back this predicate directly.
+        # ----------------------------------------------------------------
+        if fuzzy and q and total == 0:
+            # Rebuild WHERE using only the non-FTS filters; the FTS
+            # predicate (params[0]) is the first element in `conditions`
+            # iff `q` was set, so drop conditions[0] and params[0].
+            non_fts_conditions = conditions[1:]
+            non_fts_params = params[1:]
+
+            trgm_where = "WHERE (%s <%% title OR %s <%% content)"
+            if non_fts_conditions:
+                trgm_where += " AND " + " AND ".join(non_fts_conditions)
+
+            # Lower the word-similarity threshold for this transaction
+            # only. Must go through SET LOCAL (not set_limit(), which
+            # only affects the `%` operator, not `<%`).
+            await conn.execute(
+                "SET LOCAL pg_trgm.word_similarity_threshold = 0.3"
+            )
+
+            # Count: same predicate, so callers get an accurate `total`.
+            trgm_count_params = [q, q] + non_fts_params
+            cur = await conn.execute(
+                f"SELECT COUNT(*) FROM entries {trgm_where}",
+                trgm_count_params,
+            )
+            total = (await cur.fetchone())[0]
+
+            # Data: order by best-of(title, content) word_similarity DESC.
+            trgm_data_query = f"""
+                SELECT {_SELECT_COLS}
+                FROM entries
+                {trgm_where}
+                ORDER BY GREATEST(word_similarity(%s, title), word_similarity(%s, content)) DESC
+                LIMIT %s OFFSET %s
+            """
+            trgm_data_params = [q, q] + non_fts_params + [q, q, limit, offset]
+            cur = await conn.execute(trgm_data_query, trgm_data_params)
+            cur.row_factory = dict_row
+            rows = await cur.fetchall()
 
         # Observability: batched INSERT for every entry surfaced in this page.
         await log_entry_reads(conn, user, [str(r["id"]) for r in rows])

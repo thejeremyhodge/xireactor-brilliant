@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="xiReactor Brilliant API",
     description="Knowledge base API with RLS-enforced permissions and governance pipeline",
-    version="0.1.0",
+    version="0.4.0",
     lifespan=lifespan,
     redirect_slashes=False,
 )
@@ -57,6 +57,7 @@ _route_modules = [
     ("routes.staging", "staging", "/staging"),
     ("routes.import_files", "router", "/import"),
     ("routes.types", "types", "/types"),
+    ("routes.tags", "router", "/tags"),
     ("routes.session", "session", "/session-init"),
     ("routes.invitations", "invitations", "/invitations"),
     ("routes.permissions", "entry_perms_router", "/entries"),

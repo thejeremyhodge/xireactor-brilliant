@@ -112,7 +112,35 @@ async def main():
     else:
         print("  SKIP  review_staging — no staging item created")
 
-    # 12. delete_entry (cleanup)
+    # 12. suggest_tags — corpus-driven ranker (T-0210)
+    # Content deliberately namechecks tags seeded in 005_seed.sql
+    # ('api', 'mission', 'rls', 'strategy') to exercise at least one hit.
+    suggest_result = await test("suggest_tags", api.post("/tags/suggest", json={
+        "content": (
+            "Reviewing the API auth spec against our multi-tenant RLS "
+            "mission. Strategy calls for rate limits per agent key."
+        ),
+        "limit": 10,
+    }))
+    if suggest_result and not suggest_result.get("error"):
+        suggestions = suggest_result.get("suggestions", [])
+        if not isinstance(suggestions, list):
+            print("  FAIL  suggest_tags — suggestions is not a list")
+            failed += 1
+        else:
+            # Every suggestion must carry the documented shape.
+            shape_ok = all(
+                isinstance(s, dict)
+                and "tag" in s
+                and "score" in s
+                and "usage_count" in s
+                for s in suggestions
+            )
+            if not shape_ok:
+                print("  FAIL  suggest_tags — suggestion shape drift")
+                failed += 1
+
+    # 13. delete_entry (cleanup)
     if new_id:
         await test("delete_entry", api.delete(f"/entries/{new_id}"))
 

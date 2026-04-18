@@ -84,7 +84,7 @@ Your API key is provided automatically through the MCP connection. Your key type
 - **Agent keys** (`agent` source): all writes routed through the staging/governance pipeline — use `submit_staging`
 - **API integration keys** (`api` source): same as interactive
 
-Check your key type from the `session_init` response at session start.
+Check your key type from `manifest.user.source` in the `session_init` response at session start.
 
 ## Invite Onboarding
 
@@ -125,23 +125,44 @@ If unclear, show this table and ask what they need.
 
 At the beginning of every conversation, initialize your KB context:
 
-1. **Call `session_init`** — returns a pre-assembled context bundle:
-   - Auto-scaled index depth (L4 for small KBs, L2 for large)
-   - System entries — user-authored rules/conventions under `System/*` (may be empty on a fresh org). The content-type registry is served separately via `get_types`, not bundled here.
-   - KB metadata (total entries, last updated, your role)
-   - `pending_reviews` — `{ count, items[] (top 5 tier ≥ 3), review_url }`. **If `count > 0` on resume, surface this in the standup briefing unconditionally — the user should not have to ask.**
+1. **Call `session_init`** — returns a compact `manifest` object (~≤ 2K tokens regardless of KB size). The manifest tells you WHAT exists and WHERE to look; it does NOT inline full content or the relationship graph.
 
-2. **Internalize the bundle.** You now know:
-   - What topics the KB covers and how much content exists
-   - Every document title and where it lives (at appropriate depth)
-   - How documents relate to each other
-   - What content types are available (query the registry with `get_types`)
+   ```json
+   {
+     "manifest": {
+       "total_entries": 487,
+       "last_updated": "2026-04-18T09:12:00+00:00",
+       "user": { "id": "...", "display_name": "...", "role": "admin", "source": "web_ui" },
+       "categories":   [ { "content_type": "context", "count": 52 }, ... ],
+       "top_paths":    [ { "logical_path_prefix": "Projects", "count": 128 }, ... ],
+       "system_entries": [ { "id": "...", "title": "System: RLS Policies", "logical_path": "System/rls-policies" } ],
+       "pending_reviews": { "count": 2, "items": [ ... ], "review_url": "/staging?status=pending&tier_gte=3" },
+       "hints": [
+         "call get_index(depth=3, path='Projects/') to see titles and relationships under 'Projects/'",
+         "call search_entries(q=...) for keyword lookup; get_entry(id) for full content"
+       ]
+     }
+   }
+   ```
 
-3. **Check your key type** from `metadata.user.source`:
+2. **Internalize the manifest.** You now know:
+   - How many entries exist and when the KB was last updated
+   - Which content types dominate (`categories`) and which top-level path buckets to drill into (`top_paths`)
+   - Which system rules exist (titles + logical_path only — fetch content on demand)
+   - Whether Tier 3+ governance items are waiting (`pending_reviews.count`)
+
+3. **Check your key type** from `manifest.user.source`:
    - If `agent`: all creates/updates go through `submit_staging`
    - If `web_ui` or `api`: you can write directly with `create_entry`, `update_entry`, `append_entry`
 
-4. **Use the index to answer questions before fetching full content.** When the user asks "what do we know about X?", check the index first. Only fetch full content (`get_entry`) when you need the actual text.
+4. **Drill down instead of dumping.** The manifest deliberately omits full content. When you need more detail:
+   - `get_index(depth=3, path='Projects/')` — titles + relationships under a path bucket
+   - `get_index(depth=4, content_type='decision')` — summaries for a slice
+   - `search_entries(q='...')` — keyword lookup across the KB
+   - `get_entry(id)` — full content of a single entry (including any `system_entries[].id` you want to read)
+   - `get_neighbors(id, depth=2)` — graph traversal from a known entry
+
+   The `manifest.hints` array surfaces suggested next calls. Follow them when they fit the user's intent.
 
 ---
 
@@ -151,25 +172,25 @@ Reconstruct context so the user picks up where they left off.
 
 ### Steps
 
-1. **Call `session_init`** to load the current KB state
+1. **Call `session_init`** to load the current manifest
 2. **Find recent daily notes** — `search_entries(content_type="daily", limit=3)` to get recent session logs
 3. **Read the latest daily note** — `get_entry` on the most recent result to see what was discussed
-4. **Read `session_init.pending_reviews`** — no extra call needed; it was returned with the bundle. If `count > 0`, include the items in the briefing without being asked.
+4. **Read `manifest.pending_reviews`** — no extra call needed; it was returned with the manifest. If `count > 0`, include the items in the briefing without being asked.
 5. **Present a briefing** — concise standup format:
 
 ```
 Welcome back.
 
-**KB Status**: [N entries, last updated timestamp]
+**KB Status**: [manifest.total_entries entries, last updated manifest.last_updated]
 **Last session** ([date]): [Brief summary from daily note]
-**Pending reviews**: [pending_reviews.count items awaiting review — list top 3 from pending_reviews.items with target_path + change_type + age_hours, link to pending_reviews.review_url]
+**Pending reviews**: [manifest.pending_reviews.count items awaiting review — list top 3 from manifest.pending_reviews.items with target_path + change_type + age_hours, link to manifest.pending_reviews.review_url]
 **Inbox**: [N files waiting in inbox/ — see Brilliant-Anchor Workflow]
 **Recent activity**: [New entries or updates since last session]
 
 What would you like to focus on?
 ```
 
-Only omit the **Pending reviews** line when `pending_reviews.count == 0`.
+Only omit the **Pending reviews** line when `manifest.pending_reviews.count == 0`.
 
 6. **Create or append today's daily note** — see [Daily Notes](#daily-notes)
 
@@ -310,6 +331,13 @@ Combine with filters for precision:
 search_entries(q="pricing", content_type="decision")
 ```
 
+### Fuzzy fallback for typos
+When an exact-match search returns nothing and the user's query might be a typo:
+```
+search_entries(q="klaude", fuzzy=True)  # surfaces "claude" entries on near-miss
+```
+`fuzzy` is a **pure fallback** — the exact/FTS path runs first and `fuzzy=true` only engages when FTS returns zero rows. Default is `false` so existing behavior is unchanged. Useful when the user misspells a name, a project slug, or a technical term.
+
 ### Filtered browsing
 Browse by content type, path, or department:
 ```
@@ -368,6 +396,18 @@ If the content type is ambiguous, call `get_types` to fetch the registry and pic
 5. **Link to related entries** if relationships exist
 6. **Report** — entry title, path, and ID
 
+### Tag Suggestions
+
+When creating or updating an entry, pick tags from the org's existing vocabulary rather than inventing new ones — consistent tags make search and browsing sharper.
+
+```
+suggest_tags(content="...the entry body or a draft summary...", limit=10)
+```
+
+Returns `{suggestions: [{tag, score, usage_count}, ...]}` ranked by how well each existing tag matches the content, weighted by how often it's already in use. RLS-scoped: only the caller's org's tags are considered.
+
+Use the top 2–5 suggestions as-is, or mix them with one or two new tags if the content introduces a genuinely new facet.
+
 ### Cross-Entry References in Content
 
 When entry content references another entry, two link forms are extracted on write and resolved on read into clickable references:
@@ -383,7 +423,7 @@ Use `create_link` only when you need a typed link (`mentions`, `supersedes`, etc
 
 For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), reach for `import_vault`:
 
-- Always run `import_vault(path=..., dry_run=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
+- Always run `import_vault(path=..., preview_only=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
 - On the real run, capture the returned `batch_id`. Report it to the user.
 - If the import looks wrong in retrospect, call `rollback_import(batch_id)` — archives the imported entries, removes created links, purges pending staging items from the batch.
 
@@ -530,13 +570,13 @@ Beyond org-wide roles, admins and entry owners can grant per-entry or per-path a
 - The index and search automatically filter to entries you can see
 - A 404 may mean the entry exists but is outside your permission scope
 - Your `source` tag is set automatically — you don't need to specify it
-- Check `metadata.user.role` from `session_init` to know your capabilities
+- Check `manifest.user.role` from `session_init` to know your capabilities
 
 ---
 
 ## Content Type Awareness
 
-The content-type registry lives in its own table and is fetched via `get_types` (it is NOT carried in `session_init.system_entries`). Use it to:
+The content-type registry lives in its own table and is fetched via `get_types` (it is NOT carried in `manifest.system_entries`, which only holds user-authored `content_type=system` rule entries). Use it to:
 
 1. **Validate content types** before creating entries — only use canonical types
 2. **Suggest types** when the user is unsure — show available types from the registry
@@ -564,8 +604,9 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `list_staging` | List/filter staging pipeline items |
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
-| `import_vault` | Bulk-import markdown files; supports `dry_run` for collision preview; returns `batch_id` |
+| `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id` |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
+| `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
 
 ## Auto-Save Rule
