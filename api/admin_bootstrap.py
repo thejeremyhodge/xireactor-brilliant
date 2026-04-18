@@ -46,23 +46,37 @@ def _generate_api_key() -> str:
     return f"{prefix}_{suffix[4:]}"
 
 
+DEFAULT_ORG_NAME = "My Workspace"
+
+
 async def _create_admin_and_flip_latch(
-    pool, email: str, password: str, api_key: str | None = None
+    pool,
+    email: str,
+    password: str,
+    api_key: str | None = None,
+    org_name: str = DEFAULT_ORG_NAME,
 ) -> tuple[str, str]:
     """Create the admin user + API key and flip the first-run latch atomically.
 
     Single transaction:
       1. `SELECT first_run_complete FROM brilliant_settings WHERE id = 1 FOR UPDATE`
          — if TRUE, raise `FirstRunAlreadyClaimed`.
-      2. `INSERT` the admin user (hardcoded `id='usr_xr_admin'`, `org_id='org_demo'`).
-      3. `INSERT` the API key row (bcrypt hash + 9-char prefix).
-      4. `UPDATE brilliant_settings SET first_run_complete = TRUE, updated_at = now()`.
+      2. `INSERT` the `org_demo` organization row (ON CONFLICT DO UPDATE
+         — overwrites the legacy "Demo Organization" label with the
+         operator-supplied name so production installs don't display
+         "Demo Organization" in the UI).
+      3. `INSERT` the admin user (hardcoded `id='usr_xr_admin'`, `org_id='org_demo'`).
+      4. `INSERT` the API key row (bcrypt hash + 9-char prefix).
+      5. `UPDATE brilliant_settings SET first_run_complete = TRUE, updated_at = now()`.
 
     Args:
         pool: An open AsyncConnectionPool.
         email: Admin email (case-insensitive; stored lowercase, SHA-256 hashed).
         password: Admin password (bcrypt hashed before storage).
         api_key: Optional plaintext API key. If None, one is generated here.
+        org_name: Display name for the organization (user-facing). Defaults
+            to ``"My Workspace"`` for the env-driven path when
+            ``ADMIN_ORG_NAME`` is not set.
 
     Returns:
         `(api_key_plaintext, user_id)` — caller is responsible for surfacing
@@ -114,22 +128,25 @@ async def _create_admin_and_flip_latch(
                     "first_run_complete=TRUE; admin bootstrap is closed"
                 )
 
-            # Ensure the `org_demo` organization exists before the admin
-            # user INSERT below (users.org_id FK → organizations.id).
-            # Locally, 005_seed.sql creates this row; on Render we skip
-            # 005_seed (hardcoded demo API keys = security hole) so we
-            # must create the org here. Idempotent via ON CONFLICT so
-            # the docker-compose path remains a no-op.
+            # Ensure the `org_demo` organization exists with the
+            # operator-supplied display name before the admin user
+            # INSERT below (users.org_id FK → organizations.id).
+            # Locally, 005_seed.sql pre-creates the row with the name
+            # "Demo Organization"; we overwrite it here with the
+            # user-chosen name so production installs don't display the
+            # legacy seed label. On Render (where 005_seed is skipped)
+            # this is the sole creator of the org row.
             await conn.execute(
                 """
                 INSERT INTO organizations (id, name, settings)
                 VALUES (
                     'org_demo',
-                    'Demo Organization',
+                    %s,
                     '{"governance_tier_default": 2, "max_entries": 10000}'
                 )
-                ON CONFLICT (id) DO NOTHING
-                """
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+                """,
+                (org_name,),
             )
 
             # Insert admin user (exact same values as v0.3.1 env-driven path).
@@ -188,6 +205,7 @@ async def ensure_admin_user(pool) -> None:
     admin_email = os.getenv("ADMIN_EMAIL", "").strip()
     admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
     admin_api_key = os.getenv("ADMIN_API_KEY", "").strip()
+    admin_org_name = os.getenv("ADMIN_ORG_NAME", "").strip() or DEFAULT_ORG_NAME
 
     # Fail closed: require both email and password
     if not admin_email or not admin_password:
@@ -216,6 +234,7 @@ async def ensure_admin_user(pool) -> None:
             admin_email,
             admin_password,
             api_key=admin_api_key or None,
+            org_name=admin_org_name,
         )
     except FirstRunAlreadyClaimed:
         # Race: another process / worker flipped the latch between our
@@ -239,7 +258,7 @@ async def ensure_admin_user(pool) -> None:
 
 
 async def create_admin_via_post(
-    pool, email: str, password: str
+    pool, email: str, password: str, org_name: str = DEFAULT_ORG_NAME
 ) -> tuple[str, str]:
     """POST-driven bootstrap — called from `/setup` (T-0214) on Render deploys.
 
@@ -251,6 +270,8 @@ async def create_admin_via_post(
         pool: An open AsyncConnectionPool.
         email: Admin email from the `/setup` form.
         password: Admin password from the `/setup` form.
+        org_name: Organization display name from the `/setup` form
+            (user-facing label shown throughout the UI).
 
     Returns:
         `(api_key_plaintext, user_id)`.
@@ -259,4 +280,6 @@ async def create_admin_via_post(
         FirstRunAlreadyClaimed: the latch is already TRUE — `/setup` should
             map this to a 404.
     """
-    return await _create_admin_and_flip_latch(pool, email, password, api_key=None)
+    return await _create_admin_and_flip_latch(
+        pool, email, password, api_key=None, org_name=org_name
+    )

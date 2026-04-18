@@ -117,7 +117,7 @@ _BASE_STYLE = """
   p.sub { color: #555; margin-top: 0; }
   form { display: flex; flex-direction: column; gap: 14px; margin-top: 24px; }
   label { font-size: 0.9rem; color: #333; }
-  input[type=email], input[type=password] {
+  input[type=email], input[type=password], input[type=text] {
     padding: 10px 12px; font-size: 1rem; border: 1px solid #ccc;
     border-radius: 6px; width: 100%; box-sizing: border-box;
   }
@@ -142,13 +142,18 @@ _BASE_STYLE = """
 """
 
 
-def _render_setup_form(email: str = "", error: str | None = None) -> str:
+def _render_setup_form(
+    email: str = "",
+    org_name: str = "",
+    error: str | None = None,
+) -> str:
     """Render the ``/setup`` form.
 
-    On validation failure we re-render with the submitted email pre-filled
-    (but never the password — passwords are never echoed back to the user).
+    On validation failure we re-render with the submitted email + org_name
+    pre-filled (but never the password — passwords are never echoed back).
     """
     safe_email = _html.escape(email, quote=True)
+    safe_org = _html.escape(org_name, quote=True)
     error_html = (
         f'<div class="error" role="alert">{_html.escape(error)}</div>'
         if error
@@ -172,8 +177,13 @@ def _render_setup_form(email: str = "", error: str | None = None) -> str:
   {error_html}
   <form method="post" action="/setup" enctype="application/x-www-form-urlencoded">
     <div>
+      <label for="org_name">Workspace name</label>
+      <input id="org_name" name="org_name" type="text" value="{safe_org}"
+             placeholder="e.g. Acme Corp" maxlength="100" required autofocus>
+    </div>
+    <div>
       <label for="email">Admin email</label>
-      <input id="email" name="email" type="email" value="{safe_email}" required autofocus>
+      <input id="email" name="email" type="email" value="{safe_email}" required>
     </div>
     <div>
       <label for="password">Choose a password</label>
@@ -362,6 +372,7 @@ async def setup_form() -> HTMLResponse:
 @router.post("/setup")
 async def setup_submit(
     request: Request,
+    org_name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
     password_confirm: str = Form(...),
@@ -382,11 +393,16 @@ async def setup_submit(
     await _require_first_run_open(pool)
 
     email_clean = (email or "").strip()
+    org_name_clean = (org_name or "").strip()
 
     # Validate — stay before the bootstrap call so a failed validation
     # never touches the DB or the latch.
     error: str | None = None
-    if not email_clean:
+    if not org_name_clean:
+        error = "Workspace name is required."
+    elif len(org_name_clean) > 100:
+        error = "Workspace name must be 100 characters or fewer."
+    elif not email_clean:
         error = "Email is required."
     elif "@" not in email_clean:
         error = "Please enter a valid email address."
@@ -397,13 +413,15 @@ async def setup_submit(
 
     if error:
         return HTMLResponse(
-            _render_setup_form(email=email_clean, error=error),
+            _render_setup_form(
+                email=email_clean, org_name=org_name_clean, error=error
+            ),
             status_code=400,
         )
 
     try:
         api_key_plaintext, _user_id = await create_admin_via_post(
-            pool, email_clean, password
+            pool, email_clean, password, org_name=org_name_clean
         )
     except FirstRunAlreadyClaimed:
         # Another request raced us to the latch — treat as sealed.
