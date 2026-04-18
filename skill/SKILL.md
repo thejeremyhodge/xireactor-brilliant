@@ -331,6 +331,13 @@ Combine with filters for precision:
 search_entries(q="pricing", content_type="decision")
 ```
 
+### Fuzzy fallback for typos
+When an exact-match search returns nothing and the user's query might be a typo:
+```
+search_entries(q="klaude", fuzzy=True)  # surfaces "claude" entries on near-miss
+```
+`fuzzy` is a **pure fallback** — the exact/FTS path runs first and `fuzzy=true` only engages when FTS returns zero rows. Default is `false` so existing behavior is unchanged. Useful when the user misspells a name, a project slug, or a technical term.
+
 ### Filtered browsing
 Browse by content type, path, or department:
 ```
@@ -389,6 +396,18 @@ If the content type is ambiguous, call `get_types` to fetch the registry and pic
 5. **Link to related entries** if relationships exist
 6. **Report** — entry title, path, and ID
 
+### Tag Suggestions
+
+When creating or updating an entry, pick tags from the org's existing vocabulary rather than inventing new ones — consistent tags make search and browsing sharper.
+
+```
+suggest_tags(content="...the entry body or a draft summary...", limit=10)
+```
+
+Returns `{suggestions: [{tag, score, usage_count}, ...]}` ranked by how well each existing tag matches the content, weighted by how often it's already in use. RLS-scoped: only the caller's org's tags are considered.
+
+Use the top 2–5 suggestions as-is, or mix them with one or two new tags if the content introduces a genuinely new facet.
+
 ### Cross-Entry References in Content
 
 When entry content references another entry, two link forms are extracted on write and resolved on read into clickable references:
@@ -404,7 +423,7 @@ Use `create_link` only when you need a typed link (`mentions`, `supersedes`, etc
 
 For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), reach for `import_vault`:
 
-- Always run `import_vault(path=..., dry_run=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
+- Always run `import_vault(path=..., preview_only=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
 - On the real run, capture the returned `batch_id`. Report it to the user.
 - If the import looks wrong in retrospect, call `rollback_import(batch_id)` — archives the imported entries, removes created links, purges pending staging items from the batch.
 
@@ -585,8 +604,9 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `list_staging` | List/filter staging pipeline items |
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
-| `import_vault` | Bulk-import markdown files; supports `dry_run` for collision preview; returns `batch_id` |
+| `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id` |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
+| `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
 
 ## Auto-Save Rule

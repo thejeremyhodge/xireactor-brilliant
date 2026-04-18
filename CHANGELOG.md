@@ -20,6 +20,26 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 - _nothing yet_
 
+## [0.4.0] — 2026-04-18 — Tag triangulation + vault import
+
+### Added
+- `suggest_tags(content)` MCP tool + `POST /tags/suggest` endpoint — deterministic, RLS-scoped ranking over the caller's existing tag vocabulary; no LLM calls
+  (issue [#8](https://github.com/thejeremyhodge/xireactor-brilliant/issues/8))
+- `fuzzy=true` flag on `GET /entries` and `search_entries` MCP tool — trigram-similarity fallback that only engages when the exact/FTS path returns zero rows; default behavior unchanged
+  (issue [#26](https://github.com/thejeremyhodge/xireactor-brilliant/issues/26))
+- Migration 026 enables `pg_trgm` and creates GIN trigram indexes on `entries.title` / `entries.content`
+- `import_vault(path)` MCP tool walks an Obsidian vault, sends files to `/import`, and the server-side import path now parses YAML frontmatter into entry fields (`title`, `tags`, `sensitivity`, `content_type`, `department`, `summary`; unknown keys → `domain_meta`) and extracts `[[wikilinks]]` + markdown links into `entry_links`
+  (issue [#31](https://github.com/thejeremyhodge/xireactor-brilliant/issues/31), bundles [#24](https://github.com/thejeremyhodge/xireactor-brilliant/issues/24) + [#25](https://github.com/thejeremyhodge/xireactor-brilliant/issues/25))
+- `tools/vault_parse.py` — reusable walker + payload builder shared by the `import_vault` MCP tool and the `tools/vault_import.py` CLI
+
+### Changed
+- **BREAKING:** `session_init` / `GET /session-init` response shape reworked to a compact ≤ 2K-token density manifest. The old payload inlined full `entries`, `relationships`, `summaries`, and full `content` for every `system_entries` row (~46K tokens on the seeded demo KB). The new shape returns counts + handles only: `manifest.total_entries`, `manifest.last_updated`, `manifest.user`, `manifest.categories` (`[{content_type, count}]`), `manifest.top_paths` (`[{logical_path_prefix, count}]`, capped ~15), `manifest.system_entries` (`[{id, title, logical_path}]` — `content` dropped), `manifest.pending_reviews` (unchanged), and `manifest.hints` (suggested drill-down calls).
+  (issue [#7](https://github.com/thejeremyhodge/xireactor-brilliant/issues/7))
+
+  **Migration for agents:** switch from reading `system_entries[].content` to calling `get_entry(id)` on the ids returned in the manifest. For the relationship graph and deep summaries, call `get_index(depth=3, path=...)` or `get_neighbors(id, depth=2)` on demand. The skill bundle (`skill/knowledge-base.zip`) is re-zipped in this release; Claude Co-work operators maintaining a separate skill artifact need to re-zip their copy as well.
+
+- **BREAKING (MCP surface):** `import_vault(files=...)` removed; the new signature is `import_vault(path, preview_only=False, exclude=None, max_files=500, source_vault=None, base_path=None)`. For Docker-hosted MCP, `path` must be on a bind-mounted volume the MCP container can read.
+
 ## [0.3.1] — 2026-04-18 — Installer self-clone
 
 ### Added
