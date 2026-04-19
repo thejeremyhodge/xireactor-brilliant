@@ -1,13 +1,15 @@
 """Bulk markdown file import endpoint with preview, collision detection, and batch tracking."""
 
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import tarfile
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse
 from psycopg.rows import dict_row
 
 from auth import UserContext, get_current_user
@@ -849,6 +851,542 @@ async def import_vault_from_blob(
             source_vault,
             [],  # no caller-supplied collision resolutions on the blob path
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /import/vault-upload — Browser multipart tar → blob → import
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/vault-upload",
+    response_model=ImportExecuteResponse,
+    status_code=201,
+)
+async def import_vault_upload(
+    file: UploadFile = File(...),
+    source_vault: str | None = Form(None),
+    base_path: str | None = Form(None),
+    excludes: str | None = Form(
+        None,
+        description="Comma-separated list of glob patterns to exclude (merged with DEFAULT_EXCLUDES).",
+    ),
+    user: UserContext = Depends(get_current_user),
+):
+    """Browser-driven bulk vault import (Sprint 0040b).
+
+    Accepts a multipart tarball uploaded directly from the user's browser,
+    writes the bytes to the blob store via the same ``services.storage``
+    helper ``POST /attachments`` uses, records a ``blobs`` row, then hands
+    the tarball contents to the shared ``_execute_import`` pipeline.
+
+    This is the MCP-bypass path: it avoids Claude's per-turn output cap,
+    Co-work's restricted outbound allowlist, and the
+    ``upload_attachment(path=...)`` filesystem gap on remote MCP.
+
+    Size caps (env-overridable, read at request time):
+
+    * ``MAX_VAULT_TARBALL_BYTES`` — default 25MB. Enforced **before** the
+      bytes are written to storage so oversize uploads do not leak a
+      ``blobs`` row or an ``import_batches`` row.
+    * ``MAX_VAULT_UNCOMPRESSED_BYTES`` — default 200MB. Enforced
+      mid-iteration by ``iter_tarball_md``; the import transaction rolls
+      back on breach.
+
+    Auth is required (``Depends(get_current_user)``); anonymous callers
+    receive 401 via the standard dependency.
+
+    On success returns 201 JSON with the ``ImportExecuteResponse`` shape
+    plus ``blob_id`` pointing at the persisted tarball (useful for
+    rollback / reprocessing).
+    """
+    max_tarball = _max_vault_tarball_bytes()
+    max_uncompressed = _max_vault_uncompressed_bytes()
+
+    # --- Step 1: stream bytes into memory, hashing + size-capping as we go ---
+    # Mirrors routes/attachments.py::upload_attachment. ``UploadFile.size``
+    # isn't populated until the full body is drained so enforcement has to
+    # happen inline on the running byte counter. Rejecting **before** any
+    # blob write keeps the 413 path clean of blob + batch row leaks.
+    _READ_CHUNK = 65536
+    hasher = hashlib.sha256()
+    buf = io.BytesIO()
+    total = 0
+    while True:
+        chunk = await file.read(_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_tarball:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Vault tarball exceeds MAX_VAULT_TARBALL_BYTES "
+                    f"({max_tarball} bytes)"
+                ),
+            )
+        hasher.update(chunk)
+        buf.write(chunk)
+
+    sha256_hex = hasher.hexdigest()
+    data = buf.getvalue()
+
+    # Tarball content type — browsers typically send application/gzip or
+    # application/x-tar; fall back to octet-stream so the blobs row always
+    # has a non-null value.
+    effective_ct = (
+        file.content_type
+        or "application/gzip"
+    )
+
+    # --- Step 2: parse excludes (multipart Form field is a single string) ---
+    # Accept comma-separated globs for convenience; None / empty strings
+    # yield just the DEFAULT_EXCLUDES set.
+    excludes_list: list[str] | None = None
+    if excludes:
+        excludes_list = [p.strip() for p in excludes.split(",") if p.strip()] or None
+
+    # --- Step 3: persist bytes + run import under the caller's RLS context ---
+    # We put the bytes to storage first (outside the DB txn) because the
+    # storage backend is not transactional. If the subsequent ``blobs``
+    # INSERT fails we may leak orphan bytes — matches the existing
+    # /attachments semantics (acceptable for v1; sweep job reconciles).
+    async with get_db(user) as conn:
+        # Dedup probe — same bytes already uploaded by this org?
+        cur = await conn.execute(
+            """
+            SELECT id, storage_backend, storage_key, content_type, size_bytes
+            FROM blobs
+            WHERE org_id = %s AND sha256 = %s
+            """,
+            (user.org_id, sha256_hex),
+        )
+        cur.row_factory = dict_row
+        existing = await cur.fetchone()
+
+        if existing is not None:
+            blob_id = str(existing["id"])
+        else:
+            storage = get_storage()
+            storage_key = await storage.put(
+                user.org_id, sha256_hex, effective_ct, data
+            )
+            storage_backend = (
+                os.environ.get("STORAGE_BACKEND") or "local"
+            ).strip().lower()
+
+            cur = await conn.execute(
+                """
+                INSERT INTO blobs (
+                    org_id, sha256, content_type, size_bytes,
+                    storage_backend, storage_key, uploaded_by
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (org_id, sha256) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    user.org_id,
+                    sha256_hex,
+                    effective_ct,
+                    total,
+                    storage_backend,
+                    storage_key,
+                    user.id,
+                ),
+            )
+            cur.row_factory = dict_row
+            inserted = await cur.fetchone()
+            if inserted is None:
+                # Lost a race with a concurrent upload — re-read the row.
+                cur = await conn.execute(
+                    """
+                    SELECT id FROM blobs WHERE org_id = %s AND sha256 = %s
+                    """,
+                    (user.org_id, sha256_hex),
+                )
+                cur.row_factory = dict_row
+                inserted = await cur.fetchone()
+                if inserted is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Blob persisted but row not visible; retry.",
+                    )
+            blob_id = str(inserted["id"])
+
+        # --- Step 4: iterate tarball and collect ImportFile list ---
+        # Reuses the same walker + exclude logic as /vault-from-blob so
+        # there's a single parsing code path. ValueError from the walker =
+        # zip-bomb guard tripped; translate to 413 before any import_batches
+        # row is created.
+        default_excludes = resolve_exclude_patterns(excludes_list)
+        files_data: list[ImportFile] = []
+        try:
+            for rel_path, content in iter_tarball_md(
+                data, default_excludes, max_uncompressed
+            ):
+                files_data.append(
+                    ImportFile(filename=rel_path, content=content)
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc))
+        except tarfile.TarError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid tarball: {exc}",
+            )
+
+        # --- Step 5: defaults + dispatch to shared core pipeline ---
+        source_vault_effective = source_vault or "browser-upload"
+        base_path_effective = (
+            base_path if base_path is not None else "browser-upload"
+        )
+
+        result = await _execute_import(
+            conn,
+            user,
+            files_data,
+            base_path_effective,
+            source_vault_effective,
+            [],  # no caller-supplied collision resolutions on the upload path
+        )
+
+    # Echo the blob_id on the response so the UI can show it alongside the
+    # batch_id (handy for rollback + reprocessing).
+    result.blob_id = blob_id
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GET /import/vault — Browser-facing upload page (inline HTML/CSS/JS)
+# ---------------------------------------------------------------------------
+
+
+_VAULT_PAGE_STYLE = """
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 640px; margin: 48px auto; padding: 0 16px; color: #111;
+         line-height: 1.5; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  p.sub { color: #555; margin-top: 0; }
+  form { display: flex; flex-direction: column; gap: 14px; margin-top: 24px; }
+  label { font-size: 0.9rem; color: #333; display: block; margin-bottom: 4px; }
+  input[type=file], input[type=text], input[type=password] {
+    padding: 10px 12px; font-size: 1rem; border: 1px solid #ccc;
+    border-radius: 6px; width: 100%; box-sizing: border-box;
+  }
+  input[type=checkbox] { margin-right: 6px; }
+  button { padding: 10px 14px; font-size: 1rem; background: #111; color: #fff;
+           border: 0; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #333; }
+  button[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .field { margin: 0; }
+  .hint { color: #666; font-size: 0.85rem; margin-top: 4px; }
+  .panel { padding: 12px 14px; border-radius: 6px; margin-top: 20px;
+           font-size: 0.95rem; white-space: pre-wrap; word-break: break-word; }
+  .panel.ok { background: #e8f6ec; border: 1px solid #9fd6b1; color: #1a5a2d; }
+  .panel.err { background: #fdecec; border: 1px solid #f5b5b5; color: #8a1f1f; }
+  .panel.info { background: #f1f5ff; border: 1px solid #c5d3f2; color: #22346b; }
+  code { background: #f4f4f4; border: 1px solid #ddd; padding: 2px 6px;
+         border-radius: 4px; font-size: 0.9rem; word-break: break-all; }
+  code.block { display: block; padding: 10px 12px; margin-top: 6px; }
+  .hidden { display: none; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: #444; font-size: 0.9rem; }
+"""
+
+
+def _render_vault_upload_page() -> str:
+    """Render the ``GET /import/vault`` browser-upload page.
+
+    Self-contained: zero external fetches (no CDN, no webfonts, no images).
+    The page:
+
+    1. On load, checks ``localStorage.brilliant_api_key``. If present the
+       Bearer token is attached automatically to the POST; if absent, a
+       password-style input renders with an optional "save in this browser"
+       checkbox that writes the pasted key back to the same localStorage
+       key so the next visit auto-populates.
+    2. On submit, POSTs multipart to ``/import/vault-upload`` with the
+       tarball file and optional ``source_vault`` / ``base_path`` /
+       ``excludes`` fields.
+    3. On success, renders ``{created, staged, batch_id}`` inline plus a
+       rollback hint pointing at the MCP ``rollback_import`` tool.
+    4. On HTTP error, renders the server's JSON ``detail`` verbatim — no
+       generic fallback message.
+    """
+    # All JS lives in a single <script> block. Curly-braces intended for
+    # JavaScript must be doubled (``{{`` / ``}}``) because the outer string
+    # is an f-string. No f-string substitutions happen inside the script.
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Import vault — Brilliant</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{_VAULT_PAGE_STYLE}</style>
+</head>
+<body>
+  <h1>Import an Obsidian vault</h1>
+  <p class="sub">
+    Upload a tarball (<code>.tgz</code> / <code>.tar.gz</code>) of your
+    vault. The file is parsed server-side and imported into your knowledge
+    base in a single batch.
+  </p>
+
+  <div id="auth-missing" class="panel info hidden">
+    <strong>API key required.</strong> Paste the admin API key you received
+    during setup. Get a new one by signing in at
+    <code>/auth/login</code> if you've lost it.
+  </div>
+
+  <form id="upload-form">
+    <div id="key-field" class="field hidden">
+      <label for="api_key">API key</label>
+      <input id="api_key" name="api_key" type="password"
+             placeholder="brilliant_..." autocomplete="off" required>
+      <div>
+        <label style="display:inline-block; font-weight:normal;">
+          <input id="remember" type="checkbox" checked>
+          Save in this browser
+        </label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="file">Vault tarball</label>
+      <input id="file" name="file" type="file"
+             accept=".tgz,.tar.gz,.tar,application/gzip,application/x-tar"
+             required>
+      <div class="hint">
+        Create one locally with:
+        <code>tar czf vault.tgz -C path/to/vault .</code>
+      </div>
+    </div>
+
+    <details>
+      <summary>Advanced options</summary>
+      <div class="field" style="margin-top: 10px;">
+        <label for="source_vault">source_vault (optional)</label>
+        <input id="source_vault" name="source_vault" type="text"
+               placeholder="browser-upload">
+      </div>
+      <div class="field" style="margin-top: 10px;">
+        <label for="base_path">base_path (optional)</label>
+        <input id="base_path" name="base_path" type="text"
+               placeholder="browser-upload">
+      </div>
+      <div class="field" style="margin-top: 10px;">
+        <label for="excludes">excludes — comma-separated globs (optional)</label>
+        <input id="excludes" name="excludes" type="text"
+               placeholder="e.g. Attachments/*,Templates/*">
+      </div>
+    </details>
+
+    <div>
+      <button id="submit-btn" type="submit">Upload and import</button>
+    </div>
+  </form>
+
+  <div id="result" class="hidden"></div>
+
+<script>
+  (function () {{
+    var STORAGE_KEY = "brilliant_api_key";
+    var form = document.getElementById("upload-form");
+    var keyField = document.getElementById("key-field");
+    var authMissing = document.getElementById("auth-missing");
+    var apiKeyInput = document.getElementById("api_key");
+    var rememberInput = document.getElementById("remember");
+    var submitBtn = document.getElementById("submit-btn");
+    var resultPanel = document.getElementById("result");
+
+    var storedKey = null;
+    try {{
+      storedKey = window.localStorage.getItem(STORAGE_KEY);
+    }} catch (e) {{
+      storedKey = null;
+    }}
+
+    if (storedKey && storedKey.length > 0) {{
+      keyField.classList.add("hidden");
+      authMissing.classList.add("hidden");
+      apiKeyInput.required = false;
+    }} else {{
+      keyField.classList.remove("hidden");
+      authMissing.classList.remove("hidden");
+      apiKeyInput.required = true;
+    }}
+
+    function renderPanel(kind, html) {{
+      resultPanel.className = "panel " + kind;
+      resultPanel.innerHTML = html;
+      resultPanel.classList.remove("hidden");
+    }}
+
+    function escapeHtml(s) {{
+      if (s === null || s === undefined) return "";
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }}
+
+    form.addEventListener("submit", function (ev) {{
+      ev.preventDefault();
+      resultPanel.classList.add("hidden");
+      resultPanel.innerHTML = "";
+
+      var key = storedKey;
+      if (!key || key.length === 0) {{
+        key = apiKeyInput.value.trim();
+        if (!key) {{
+          renderPanel("err", "API key is required.");
+          return;
+        }}
+        if (rememberInput.checked) {{
+          try {{
+            window.localStorage.setItem(STORAGE_KEY, key);
+            storedKey = key;
+          }} catch (e) {{
+            // localStorage may be disabled; continue with in-memory key.
+          }}
+        }}
+      }}
+
+      var fileInput = document.getElementById("file");
+      if (!fileInput.files || fileInput.files.length === 0) {{
+        renderPanel("err", "Please choose a tarball file.");
+        return;
+      }}
+
+      var fd = new FormData();
+      fd.append("file", fileInput.files[0]);
+      var sv = document.getElementById("source_vault").value.trim();
+      var bp = document.getElementById("base_path").value.trim();
+      var ex = document.getElementById("excludes").value.trim();
+      if (sv) fd.append("source_vault", sv);
+      if (bp) fd.append("base_path", bp);
+      if (ex) fd.append("excludes", ex);
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Uploading...";
+      renderPanel("info", "Uploading and importing... this can take a moment for large vaults.");
+
+      fetch("/import/vault-upload", {{
+        method: "POST",
+        headers: {{ "Authorization": "Bearer " + key }},
+        body: fd
+      }})
+        .then(function (resp) {{
+          return resp.text().then(function (text) {{
+            var payload = null;
+            try {{
+              payload = text ? JSON.parse(text) : null;
+            }} catch (e) {{
+              payload = null;
+            }}
+            return {{ status: resp.status, ok: resp.ok, payload: payload, text: text }};
+          }});
+        }})
+        .then(function (res) {{
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Upload and import";
+          if (res.ok && res.payload) {{
+            var p = res.payload;
+            var html =
+              "<strong>Import complete.</strong><br>" +
+              "Created: <code>" + escapeHtml(p.created) + "</code>  " +
+              "Staged: <code>" + escapeHtml(p.staged) + "</code>  " +
+              "Linked: <code>" + escapeHtml(p.linked) + "</code><br>" +
+              "batch_id: <code class=\\"block\\">" + escapeHtml(p.batch_id) + "</code>";
+            if (p.blob_id) {{
+              html += "blob_id: <code class=\\"block\\">" + escapeHtml(p.blob_id) + "</code>";
+            }}
+            if (p.errors && p.errors.length > 0) {{
+              html += "<br><strong>Errors:</strong><br>";
+              for (var i = 0; i < p.errors.length; i++) {{
+                html += "<code class=\\"block\\">" + escapeHtml(p.errors[i]) + "</code>";
+              }}
+            }}
+            html +=
+              "<br>To undo this import, run the MCP tool " +
+              "<code>rollback_import(batch_id=\\"" + escapeHtml(p.batch_id) +
+              "\\")</code> from Claude, or " +
+              "<code>DELETE /import/" + escapeHtml(p.batch_id) + "</code>.";
+            renderPanel("ok", html);
+          }} else {{
+            var detail = null;
+            if (res.payload && res.payload.detail !== undefined) {{
+              if (typeof res.payload.detail === "string") {{
+                detail = res.payload.detail;
+              }} else {{
+                try {{
+                  detail = JSON.stringify(res.payload.detail);
+                }} catch (e) {{
+                  detail = String(res.payload.detail);
+                }}
+              }}
+            }} else if (res.text) {{
+              detail = res.text;
+            }} else {{
+              detail = "HTTP " + res.status;
+            }}
+            var msg =
+              "<strong>Upload failed (HTTP " + res.status + ").</strong><br>" +
+              escapeHtml(detail);
+            if (res.status === 401) {{
+              msg +=
+                "<br><br>Your saved API key may be invalid. " +
+                "<button type=\\"button\\" id=\\"clear-key\\">Clear saved key</button>";
+            }}
+            renderPanel("err", msg);
+            var clearBtn = document.getElementById("clear-key");
+            if (clearBtn) {{
+              clearBtn.addEventListener("click", function () {{
+                try {{ window.localStorage.removeItem(STORAGE_KEY); }} catch (e) {{}}
+                window.location.reload();
+              }});
+            }}
+          }}
+        }})
+        .catch(function (err) {{
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Upload and import";
+          renderPanel("err",
+            "<strong>Network error.</strong><br>" + escapeHtml(err && err.message ? err.message : String(err)));
+        }});
+    }});
+  }})();
+</script>
+</body>
+</html>
+"""
+
+
+@router.get("/vault", response_class=HTMLResponse)
+async def vault_upload_page() -> HTMLResponse:
+    """Render the browser-facing vault-upload page (Sprint 0040b).
+
+    Returns an inline self-contained HTML page — zero external fetches,
+    no CDN, no template engine. Mirrors the ``/setup`` rendering pattern
+    (see ``api/routes/setup.py``).
+
+    The page POSTs multipart to ``/import/vault-upload`` with a Bearer
+    token sourced from ``localStorage.brilliant_api_key`` (set by the
+    login page after ``/auth/login`` success). When the key is missing
+    the page renders a paste-your-key fallback with an opt-in "save in
+    this browser" checkbox.
+
+    This route is always available post-migration — it is NOT gated by
+    the first-run latch. The upload endpoint itself
+    (``POST /import/vault-upload``) requires authentication via
+    ``Depends(get_current_user)``; this GET surface is intentionally
+    unauthenticated so the page can render the paste-your-key fallback.
+    """
+    return HTMLResponse(_render_vault_upload_page())
 
 
 # ---------------------------------------------------------------------------

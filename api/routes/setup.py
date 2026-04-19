@@ -345,6 +345,14 @@ def _render_done_page(
     <button type="button" id="download">Download brilliant-credentials.txt</button>
   </div>
 
+  <div class="field">
+    <div class="field-label">Optional next step</div>
+    <div class="info">
+      Already have an Obsidian vault? <a href="/import/vault">Import it now</a>
+      to seed your knowledge base.
+    </div>
+  </div>
+
 <script>
   const EMAIL = {js_email};
   const API_KEY = {js_key};

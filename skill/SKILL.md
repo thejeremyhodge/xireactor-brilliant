@@ -425,31 +425,30 @@ For per-entry creates from a conversation or a single inbox file, use `create_en
 
 #### Bulk import from Co-work (or any remote MCP)
 
-On remote Render deploys, the MCP process can't see the user's filesystem — it only has blob storage. Use the three-step **tar → upload → import** flow:
+**Don't try to ship a real vault through the MCP protocol.** Claude's per-turn output cap (~32K tokens ≈ ~100KB) is smaller than a real vault tarball — a typical 1k-file Obsidian vault is ~165KB compressed, ~225KB base64-encoded. The base64-over-MCP path that earlier versions of this skill described works only for toy vaults under ~50KB tarball.
 
-1. **Tar the vault in bash.** Co-work Claude and any remote client can run shell:
-   ```bash
-   tar czf /tmp/vault.tgz -C /path/to/vault .
-   ```
-   Keep the tarball under 25MB compressed (`MAX_VAULT_TARBALL_BYTES`) and under 200MB uncompressed (zip-bomb guard). The server rejects larger payloads with 413.
+For real vaults, **direct the user to the browser upload page** at `https://<their-api-host>/import/vault`. The page is a first-class, always-available route that:
 
-2. **Upload the tarball to a blob via inline bytes.** Remote MCP servers can't read the client's filesystem, so pass the tarball as base64 in the tool call itself:
-   ```bash
-   base64 -w 0 /tmp/vault.tgz   # one-line base64 string (macOS: base64 -i /tmp/vault.tgz)
-   ```
-   Then call:
-   ```
-   upload_attachment(
-     content_base64="<the base64 string>",
-     filename="vault.tgz",
-     content_type="application/gzip",
-   )
-   ```
-   Capture the returned `blob_id`. (Local stdio MCP users can still pass `path="/tmp/vault.tgz"` instead — but inline bytes is the canonical remote pattern.)
+- POSTs the tarball straight to the API as multipart — bypasses the MCP protocol, the Co-work bash sandbox outbound allowlist, and the Claude per-turn output cap entirely
+- Reuses the same server-side tar walk + import pipeline as `import_vault_from_blob`
+- Renders the `{created, staged, batch_id}` counts inline on success, with the rollback command for undo
+- Auto-attaches the user's API key from `localStorage` (or accepts a paste-in if missing)
 
-3. **Finalize the import.** Call `import_vault_from_blob(blob_id=<blob_id>)`. Single blocking call, 10–30s for a typical 1k-file vault. Returns `{batch_id, created, staged, linked, errors}` — report the counts to the user. `.obsidian/**` and `.trash/**` are filtered out by default; pass `excludes=[...]` for additional globs.
+What to tell the user:
 
-If the import looks wrong in retrospect, call `rollback_import(batch_id)` — same rollback semantics as the local `import_vault` path.
+> "For a vault this size, open `https://<your-api-host>/import/vault` in a browser, drop the `.tgz` in, and submit. I can't stream that many bytes through this connection — Claude's per-turn output cap blocks it."
+
+The `/setup` credentials page (end of first-run) already cross-links to `/import/vault`, so first-time users are nudged into this flow naturally.
+
+#### Small-vault / local-stdio fallback
+
+For small vaults (<~50KB tarball) or local stdio MCP (Claude Code, Claude Desktop) where filesystem access works, the original three-step `upload_attachment` → `import_vault_from_blob` flow is still available:
+
+1. `tar czf /tmp/vault.tgz -C /path/to/vault .` (cap: 25MB compressed / 200MB uncompressed; server returns 413 over)
+2. `upload_attachment(path="/tmp/vault.tgz")` on local stdio, **or** `upload_attachment(content_base64="<base64>", filename="vault.tgz", content_type="application/gzip")` for inline bytes — capture `blob_id`
+3. `import_vault_from_blob(blob_id=<blob_id>)` — single blocking call, returns `{batch_id, created, staged, linked, errors}`. `.obsidian/**` and `.trash/**` excluded by default; pass `excludes=[...]` for more globs
+
+If the import looks wrong, `rollback_import(batch_id)` — same semantics as `import_vault`.
 
 #### Bulk import from a local filesystem path (local MCP only)
 
@@ -637,7 +636,7 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
 | `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id`. **Local MCP only** — not registered on remote Render deploys; use `import_vault_from_blob` there. |
-| `upload_attachment` | Upload a file to `POST /attachments` and return `blob_id` + dedup info. Two modes: `path=` (local stdio MCP only — server must be able to read the file) or `content_base64=` + `filename=` (inline bytes — the only mode that works from remote Co-work). Upstream half of the Co-work bulk-import flow — pair with `import_vault_from_blob` for vaults, or with the digest pipeline for single PDFs |
+| `upload_attachment` | Upload a single file (PDFs, images, small docs) to `POST /attachments` and return `blob_id` + dedup info. Two modes: `path=` (local stdio MCP only — server must be able to read the file) or `content_base64=` + `filename=` (inline bytes; bounded by Claude's per-turn output cap, ~50KB practical ceiling). For attachments + small files only — **not for bulk vault imports**: real vaults exceed the per-turn output cap, so direct the user to the browser page at `/import/vault` instead |
 | `import_vault_from_blob` | Bulk-import a previously-uploaded vault tarball by `blob_id`; server-side tar walk, same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |

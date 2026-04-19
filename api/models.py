@@ -370,6 +370,11 @@ class ImportExecuteResponse(BaseModel):
     unrecognized_types: list[str] = []
     batch_id: str
     collisions_resolved: int = 0
+    # Only set by the browser-upload path (``POST /import/vault-upload``) — it
+    # persists the uploaded tarball to the blob store before running the import
+    # so operators can reproduce / roll back from the stored bytes. Other
+    # import paths leave this as ``None``.
+    blob_id: str | None = None
 
 
 class RollbackResponse(BaseModel):

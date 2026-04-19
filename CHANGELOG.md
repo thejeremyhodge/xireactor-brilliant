@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ## [Unreleased]
 
 ### Added
-- _nothing yet_
+- **`[feature][docs]` Sprint 0040b — browser vault upload (MCP-bypass onboarding path)** — first-class `/import/vault` HTML page + `POST /import/vault-upload` multipart endpoint that lets authenticated users push a vault tarball straight from their browser to the API, bypassing Claude's ~32K-token per-turn output cap, the Co-work bash sandbox outbound allowlist, and the MCP protocol entirely. Reuses the Sprint 0040 `_execute_import` + `iter_tarball_md` pipeline unchanged; renders `{created, staged, batch_id}` counts inline with the rollback command on success. Cross-linked from `/setup` so first-run flows naturally into vault seeding. SKILL.md rewritten to direct remote-MCP agents at the browser page instead of attempting base64-over-MCP for real vaults — the 0040a inline-bytes path stays as a small-vault / local-stdio fallback. README quickstart points first-time users at `https://<your-host>/import/vault`. (T-0245, T-0246, T-0247, T-0248, T-0249; spec `.xireactor/specs/0040b--2026-04-19--browser-vault-upload.md`)
 
 ### Changed
 - _nothing yet_

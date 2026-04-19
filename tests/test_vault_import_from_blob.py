@@ -741,6 +741,164 @@ def test_inline_bytes_upload_chains_to_import_from_blob(admin_key):
 
 
 # ----------------------------------------------------------------------------
+# Case 6 — browser multipart upload (Sprint 0040b / T-0245..T-0248)
+# ----------------------------------------------------------------------------
+#
+# ``POST /import/vault-upload`` is the MCP-bypass path: a user's browser POSTs
+# the tarball as multipart form-data with a Bearer token. The endpoint writes
+# the bytes to the blob store (same ``services.storage`` pipeline as
+# ``/attachments``) and runs ``_execute_import`` inline, returning the
+# ``ImportExecuteResponse`` shape plus a ``blob_id``.
+#
+# These tests hit the HTTP endpoint directly — no MCP subprocess — because the
+# endpoint is the unit under test. Size-cap coverage reuses the
+# ``api_with_small_tarball_cap`` fixture that the ``/vault-from-blob`` 413
+# test defines above.
+
+
+def _upload_vault_multipart(
+    data: bytes,
+    *,
+    key: str | None,
+    source_vault: str | None = None,
+    base_path: str | None = None,
+    excludes: str | None = None,
+) -> requests.Response:
+    """POST a tarball to ``/import/vault-upload`` as multipart form-data.
+
+    ``key=None`` deliberately omits the Authorization header so the auth-
+    required test can assert 401 on anonymous callers.
+    """
+    headers: dict = {}
+    if key is not None:
+        headers.update(_auth(key))
+    data_fields: dict = {}
+    if source_vault is not None:
+        data_fields["source_vault"] = source_vault
+    if base_path is not None:
+        data_fields["base_path"] = base_path
+    if excludes is not None:
+        data_fields["excludes"] = excludes
+    return requests.post(
+        f"{BASE_URL}/import/vault-upload",
+        headers=headers,
+        files={"file": ("vault.tgz", data, "application/gzip")},
+        data=data_fields or None,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+
+def test_browser_upload_happy_path(admin_key):
+    """Multipart POST of a 2-file tarball → 201 with non-null batch_id and
+    ``created + staged == 2`` (admin direct-insert path).
+
+    This is the end-to-end browser pathway: skip the ``/attachments`` pre-
+    upload, hand the tarball bytes straight to ``/import/vault-upload``,
+    and assert the endpoint internally writes the blob row + runs the
+    shared ``_execute_import`` pipeline.
+    """
+    run_tag = uuid.uuid4().hex[:8]
+    tar_bytes = _unique_tarball(
+        [
+            (
+                "browser.md",
+                (
+                    f"---\n"
+                    f"title: Browser Note {run_tag}\n"
+                    f"content_type: context\n"
+                    f"---\n"
+                    f"# Browser Note {run_tag}\n\nBody.\n"
+                ).encode(),
+            ),
+            (
+                "sub/browser-nested.md",
+                f"# Nested Browser {run_tag}\n\nNested body.\n".encode(),
+            ),
+        ]
+    )
+
+    base = f"test-browser-upload-{run_tag}"
+    resp = _upload_vault_multipart(
+        tar_bytes,
+        key=admin_key,
+        source_vault=base,
+        base_path=base,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body.get("batch_id"), f"missing batch_id in response: {body}"
+    assert body["created"] + body["staged"] == 2, (
+        f"expected 2 imported files (both .md), "
+        f"got created={body['created']} staged={body['staged']} body={body}"
+    )
+
+
+def test_browser_upload_requires_auth():
+    """POST without a Bearer token → 401. Ensures the public surface stays
+    closed — no vault can be uploaded anonymously."""
+    tar_bytes = _unique_tarball(
+        [("anon.md", b"# Anonymous\n\nShould never land.\n")]
+    )
+    resp = _upload_vault_multipart(tar_bytes, key=None)
+    assert resp.status_code == 401, (
+        f"expected 401 for anonymous caller, got {resp.status_code}: "
+        f"{resp.text}"
+    )
+
+
+def test_browser_upload_enforces_size_cap(api_with_small_tarball_cap, admin_key):
+    """With ``MAX_VAULT_TARBALL_BYTES`` clamped to 2 KiB, a routine multi-file
+    tarball must be rejected with a 413 **before** any ``import_batches``
+    row is written (the cap is enforced inline on the streaming read, so
+    no DB work runs)."""
+    small_max = api_with_small_tarball_cap
+    run_tag = uuid.uuid4().hex[:8]
+
+    # Random-looking payload so gzip can't squash it below the cap.
+    def _incompressible(n: int) -> bytes:
+        return os.urandom(n).hex().encode()
+
+    tar_bytes = _unique_tarball(
+        [
+            (f"{run_tag}-a.md", b"# a\n\n" + _incompressible(2048)),
+            (f"{run_tag}-b.md", b"# b\n\n" + _incompressible(2048)),
+            (f"{run_tag}-c.md", b"# c\n\n" + _incompressible(2048)),
+        ]
+    )
+    assert len(tar_bytes) > small_max, (
+        f"fixture tarball ({len(tar_bytes)} bytes) is not larger than the "
+        f"configured cap ({small_max}); test would not exercise 413 path"
+    )
+
+    before_count = _count_import_batches()
+
+    resp = _upload_vault_multipart(
+        tar_bytes,
+        key=admin_key,
+        source_vault=f"test-browser-413-{run_tag}",
+        base_path=f"test-browser-413-{run_tag}",
+    )
+    assert resp.status_code == 413, (
+        f"expected 413 for oversize upload, got {resp.status_code}: "
+        f"{resp.text}"
+    )
+    detail = ""
+    try:
+        detail = resp.json().get("detail", "")
+    except Exception:
+        detail = resp.text
+    assert "MAX_VAULT_TARBALL_BYTES" in detail or str(small_max) in detail, (
+        f"413 detail should reference the tarball cap: {detail!r}"
+    )
+
+    after_count = _count_import_batches()
+    assert after_count == before_count, (
+        f"browser-upload 413 leaked an import_batches row: "
+        f"before={before_count} after={after_count}"
+    )
+
+
+# ----------------------------------------------------------------------------
 # Subprocess harness for the MCP-tool-level validation test.
 # ----------------------------------------------------------------------------
 #

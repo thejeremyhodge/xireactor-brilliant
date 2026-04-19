@@ -131,6 +131,10 @@ Expected response shape:
 
 If you get `401`, the key is wrong. If you get `200` with an empty list, the seed data did not load — check `docker compose logs db`.
 
+### Bulk-import an existing vault (optional)
+
+After setup, bulk-import an existing Obsidian (or plain-markdown) vault at `https://<your-host>/import/vault` (locally: `http://localhost:8010/import/vault`). The page accepts a `.tgz` / `.tar.gz` tarball, runs the same server-side parse pipeline as the MCP `import_vault` tool, and renders the batch counts + rollback command inline on success. This is the canonical bulk-import path for non-trivial vaults — it bypasses Claude's per-turn output cap and the Co-work bash sandbox, both of which block MCP-protocol byte streaming for real-world vault sizes. The `/setup` credentials page links to it directly.
+
 ### Demo seed (optional)
 
 The repo ships with seeded demo users and their API keys hardcoded in the end-to-end test. One command exercises the full flow — health check, auth, CRUD, governance, import, search — and leaves you with keys you can reuse:
