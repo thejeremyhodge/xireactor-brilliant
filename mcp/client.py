@@ -23,7 +23,15 @@ class BrilliantClient:
     """Async HTTP client for the Brilliant REST API."""
 
     def __init__(self):
-        self.base_url = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").rstrip("/")
+        # On Render, BRILLIANT_BASE_URL comes from fromService.property:host
+        # which returns the bare internal service name (e.g. "brilliant-api")
+        # with no scheme. httpx rejects schemeless URLs with a protocol
+        # error, so prepend https:// when absent. Mirrors the resolution
+        # logic in remote_server.py::_resolve_api_public_url (step 3).
+        raw = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").strip()
+        if raw and not raw.startswith(("http://", "https://")):
+            raw = f"https://{raw}"
+        self.base_url = raw.rstrip("/")
         # Service-role key. The MCP must present a service-typed key for
         # ``X-Act-As-User`` to be honored upstream. Empty string is a
         # legitimate local-dev value (stdio transport against a dev API
