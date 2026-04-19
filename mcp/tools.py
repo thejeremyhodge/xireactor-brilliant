@@ -35,17 +35,26 @@ from client import BrilliantClient
 # Locate the shared vault-walking helpers (`tools/vault_parse.py`). Used by
 # the `import_vault(path)` MCP tool so we don't duplicate the walker logic.
 # Search both the repo-root-relative `tools/` dir (local MCP run from the
-# repo) and the co-located `mcp/tools/` dir (if packaged alongside). If
-# neither is found, `import_vault` will raise a helpful error at call time
-# rather than breaking server startup.
+# repo) and the co-located `mcp/tools/` dir (if packaged alongside).
+#
+# The `_VAULT_PARSE_AVAILABLE` flag gates whether the `import_vault(path)`
+# tool registers at boot. On remote Render deploys the MCP Dockerfile uses
+# `dockerContext: ./mcp`, so the repo-root `tools/` dir isn't shipped —
+# the flag stays False and `import_vault` never appears in the Co-work
+# tool list (avoids exposing a filesystem-walk tool that has no access to
+# the caller's filesystem). On local stdio runs (Claude Desktop / Claude
+# Code against a repo checkout) the flag is True and the tool registers.
 _MCP_DIR = Path(__file__).resolve().parent
 _CANDIDATE_TOOL_DIRS: list[Path] = [
     _MCP_DIR.parent / "tools",  # repo-root layout
     _MCP_DIR / "tools",         # packaged-alongside fallback
 ]
+_VAULT_PARSE_AVAILABLE: bool = False
 for _tool_dir in _CANDIDATE_TOOL_DIRS:
-    if (_tool_dir / "vault_parse.py").is_file() and str(_tool_dir) not in sys.path:
-        sys.path.insert(0, str(_tool_dir))
+    if (_tool_dir / "vault_parse.py").is_file():
+        if str(_tool_dir) not in sys.path:
+            sys.path.insert(0, str(_tool_dir))
+        _VAULT_PARSE_AVAILABLE = True
         break
 
 
@@ -585,7 +594,6 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
     # Import tools
     # -------------------------------------------------------------------
 
-    @mcp.tool()
     async def import_vault(
         path: str,
         preview_only: bool = False,
@@ -715,83 +723,91 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         return response
 
+    # ``import_vault`` is a filesystem-walk tool — it only makes sense when
+    # the MCP process can see the caller's vault directory directly. On
+    # remote Render deploys the `tools/vault_parse.py` walker isn't shipped
+    # (the MCP Dockerfile's `dockerContext: ./mcp` excludes repo-root
+    # `tools/`), so we gate registration on the walker being importable.
+    # Remote Co-work users get only `import_vault_from_blob`; local stdio
+    # users (Claude Code / Desktop) keep `import_vault` alongside it.
+    if _VAULT_PARSE_AVAILABLE:
+        mcp.tool()(import_vault)
+
     @mcp.tool()
-    async def import_vault_content(
-        files: list[dict],
-        preview_only: bool = False,
+    async def import_vault_from_blob(
+        blob_id: str,
         source_vault: str | None = None,
         base_path: str | None = None,
+        excludes: list[str] | None = None,
     ) -> dict:
-        """Import a vault from in-memory content — companion to ``import_vault``.
+        """Import a vault tarball that has already been uploaded as a blob.
 
-        Use this when the caller (e.g. Claude Co-work) has already read the
-        markdown files and can hand over their contents directly, skipping
-        the filesystem walk. The server-side ``/import`` endpoint does the
-        same frontmatter parsing, wikilink extraction, collision detection,
-        and batch tracking as ``import_vault``.
+        This is the remote-friendly bulk import path — use it from Claude
+        Co-work or any client that can't hand the MCP a local filesystem
+        path. The full flow is:
+
+            1. In bash, tar+gzip your vault:
+                   tar czf /tmp/vault.tgz -C /path/to/vault .
+               Keep the tarball under 25MB compressed (``MAX_VAULT_TARBALL_BYTES``);
+               the server rejects larger uploads with 413.
+            2. Call ``upload_attachment(path="/tmp/vault.tgz")`` and capture
+               the ``blob_id`` from the response.
+            3. Call ``import_vault_from_blob(blob_id=<blob_id>)`` — this
+               tool. The API fetches the blob under your RLS scope, streams
+               it through ``tarfile.extractfile()`` one member at a time,
+               filters for ``.md`` files (skipping ``.obsidian/**`` and
+               ``.trash/**`` by default), and runs the same frontmatter
+               parsing, wikilink extraction, and governance pipeline as
+               ``POST /import``. Typical completion: 10-30s for a ~1k-file
+               vault. Single blocking call, no polling.
+            4. Inspect ``list_staging`` to see what landed in the
+               governance queue (or the published entries if your role is
+               editor/admin).
 
         Parameters:
-          files          — list of ``{"filename": "<rel/path.md>", "content": "..."}``.
-                           ``"path"`` is also accepted as an alias for
-                           ``"filename"`` since Co-work attachments commonly
-                           surface with a ``path`` key.
-          preview_only   — when True, routes to ``/import/preview`` and
-                           returns the collision report without writing.
-          source_vault   — provenance identifier stored on the import batch.
-                           Defaults to ``"cowork-upload"``.
-          base_path      — logical_path prefix applied to every file.
-                           Defaults to ``"cowork-upload"``.
+          blob_id       — UUID returned by ``upload_attachment``. Must be
+                          visible to you under RLS (same org / scope).
+          source_vault  — provenance identifier stored on the import batch.
+                          Defaults to ``"cowork-upload"``.
+          base_path     — ``logical_path`` prefix applied to every file.
+                          Defaults to ``"cowork-upload"``.
+          excludes      — additional glob patterns (relative to the vault
+                          root inside the tarball) to skip; always merged
+                          with the built-in ``.obsidian/**`` and
+                          ``.trash/**`` defaults.
 
-        Returns the server response from ``/import`` (or ``/import/preview``)
-        with ``batch_id``, counts, and error list. On client-side validation
-        errors returns ``{"error": True, "detail": "..."}`` without calling
-        the server.
+        Returns the server response from ``POST /import/vault-from-blob``:
+          {
+            "batch_id":   "<uuid>",
+            "created":    <int>,
+            "staged":     <int>,
+            "linked":     <int>,
+            "errors":     [...],
+            ...
+          }
+
+        Notes:
+          * On remote Render deploys this is the ONLY bulk-import path.
+            The legacy ``import_vault(path)`` filesystem-walk tool is
+            local-MCP-only (stdio transport with ``tools/vault_parse.py``
+            on the server's sys.path) and will not appear in Co-work's
+            tool list.
+          * Tarballs over 25MB compressed return 413 — split the vault
+            or raise ``MAX_VAULT_TARBALL_BYTES`` on the server.
+          * Tarballs that decompress past 200MB also return 413 (zip-bomb
+            guard).
         """
         user_id = _resolve_act_as_user_id()
-
-        if not files:
-            return {"error": True, "detail": "files list is empty."}
-
-        payloads: list[dict] = []
-        for idx, f in enumerate(files):
-            if not isinstance(f, dict):
-                return {
-                    "error": True,
-                    "detail": f"files[{idx}] is not an object.",
-                }
-            filename = f.get("filename") or f.get("path")
-            content = f.get("content")
-            if not filename or content is None:
-                return {
-                    "error": True,
-                    "detail": (
-                        f"files[{idx}] requires 'filename' (or 'path') and "
-                        "'content'."
-                    ),
-                }
-            payloads.append({"filename": str(filename), "content": str(content)})
-
-        effective_base = base_path if base_path is not None else "cowork-upload"
-        effective_source = source_vault if source_vault is not None else "cowork-upload"
-
-        if preview_only:
-            return await api.post(
-                "/import/preview",
-                json={
-                    "files": payloads,
-                    "base_path": effective_base,
-                },
-                act_as=user_id,
-            )
-
+        body: dict = {"blob_id": blob_id}
+        if source_vault is not None:
+            body["source_vault"] = source_vault
+        if base_path is not None:
+            body["base_path"] = base_path
+        if excludes is not None:
+            body["excludes"] = excludes
         return await api.post(
-            "/import",
-            json={
-                "files": payloads,
-                "base_path": effective_base,
-                "source_vault": effective_source,
-                "collisions": [],
-            },
+            "/import/vault-from-blob",
+            json=body,
             act_as=user_id,
         )
 
@@ -802,8 +818,9 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Archives all entries created by the batch, removes links and pending
         staging items. The batch status changes to 'rolled_back'.
 
-        Use the batch_id returned from import_vault to identify which batch
-        to roll back. Cannot roll back an already rolled-back batch (returns 409).
+        Use the batch_id returned from ``import_vault`` or
+        ``import_vault_from_blob`` to identify which batch to roll back.
+        Cannot roll back an already rolled-back batch (returns 409).
         """
         user_id = _resolve_act_as_user_id()
         return await api.delete(f"/import/{batch_id}", act_as=user_id)

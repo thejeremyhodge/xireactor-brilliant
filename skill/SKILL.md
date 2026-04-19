@@ -421,13 +421,33 @@ Use `create_link` only when you need a typed link (`mentions`, `supersedes`, etc
 
 ### Bulk Ingestion
 
-For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), reach for `import_vault`:
+For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), pick the right bulk tool based on where you're running:
+
+#### Bulk import from Co-work (or any remote MCP)
+
+On remote Render deploys, the MCP process can't see the user's filesystem — it only has blob storage. Use the three-step **tar → upload → import** flow:
+
+1. **Tar the vault in bash.** Co-work Claude and any remote client can run shell:
+   ```bash
+   tar czf /tmp/vault.tgz -C /path/to/vault .
+   ```
+   Keep the tarball under 25MB compressed (`MAX_VAULT_TARBALL_BYTES`) and under 200MB uncompressed (zip-bomb guard). The server rejects larger payloads with 413.
+
+2. **Upload the tarball to a blob.** Call `upload_attachment(path="/tmp/vault.tgz")`. Capture the returned `blob_id`.
+
+3. **Finalize the import.** Call `import_vault_from_blob(blob_id=<blob_id>)`. Single blocking call, 10–30s for a typical 1k-file vault. Returns `{batch_id, created, staged, linked, errors}` — report the counts to the user. `.obsidian/**` and `.trash/**` are filtered out by default; pass `excludes=[...]` for additional globs.
+
+If the import looks wrong in retrospect, call `rollback_import(batch_id)` — same rollback semantics as the local `import_vault` path.
+
+#### Bulk import from a local filesystem path (local MCP only)
+
+`import_vault(path=...)` walks the directory on the MCP process's own filesystem. It is **local MCP only** — on remote Render deploys this tool is not registered; use `import_vault_from_blob` (above) instead. Claude Code and Claude Desktop over stdio see it normally.
 
 - Always run `import_vault(path=..., preview_only=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
 - On the real run, capture the returned `batch_id`. Report it to the user.
 - If the import looks wrong in retrospect, call `rollback_import(batch_id)` — archives the imported entries, removes created links, purges pending staging items from the batch.
 
-Rule of thumb: **< 10 files → per-entry tools; ≥ 10 files from a single source → `import_vault`.**
+Rule of thumb: **< 10 files → per-entry tools; ≥ 10 files from a single source → bulk import (`import_vault_from_blob` on remote, `import_vault` locally).**
 
 ---
 
@@ -604,7 +624,9 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `list_staging` | List/filter staging pipeline items |
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
-| `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id` |
+| `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id`. **Local MCP only** — not registered on remote Render deploys; use `import_vault_from_blob` there. |
+| `upload_attachment` | Stream a local file to `POST /attachments`; returns `blob_id` + dedup info. Upstream half of the Co-work bulk-import flow — pair with `import_vault_from_blob` for vaults, or with the digest pipeline for single PDFs |
+| `import_vault_from_blob` | Bulk-import a previously-uploaded vault tarball by `blob_id`; server-side tar walk, same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
