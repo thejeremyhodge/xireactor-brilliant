@@ -36,11 +36,16 @@
 
 ---
 
-> **v0.4.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+> **v0.4.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
 >
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent
 > access via MCP, and tiered governance.
+
+## New in v0.4.1
+
+- **Tag triangulation read-surface** — `session_init.manifest.tags_top` exposes the top 20 tags by entry count, so agents see the tag shape of the KB at session start. `list_tags` paginates the full corpus; `get_tag_neighbors(tag)` returns co-occurring tags (ranked by co-count + Jaccard). `search_entries(tags=[...])` accepts multi-tag AND filtering.
+- **`get_index` scale guard** — at `depth >= 2`, the endpoint now returns **422** with a hint when the caller's visible entry count exceeds 200 and no narrowing filter is supplied. Soft-breaking for existing unfiltered drill calls; the hint body points at `path=`, `content_type=`, `tag=`, or `search_entries` as recovery paths. L1 (depth=1) stays unconstrained.
 
 ## New in v0.4.0
 

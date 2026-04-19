@@ -206,6 +206,15 @@ async def list_entries(
     logical_path: str | None = Query(None, description="Filter by path prefix"),
     department: str | None = Query(None, description="Filter by department"),
     tag: str | None = Query(None, description="Filter by tag (array contains)"),
+    tags: list[str] | None = Query(
+        None,
+        description=(
+            "Filter by multiple tags with AND semantics — entry must contain "
+            "ALL listed tags (repeat the param: ?tags=a&tags=b). Mutually "
+            "exclusive with the singular `tag` param; sending both returns "
+            "422."
+        ),
+    ),
     fuzzy: bool = Query(
         False,
         description=(
@@ -229,6 +238,20 @@ async def list_entries(
     scoping is inherited from the surrounding `get_db(user)` session, so
     fuzzy results respect the same visibility rules as exact search.
     """
+    # Mutual exclusion: callers must pick either the singular `tag` OR the
+    # plural `tags` filter. Sending both simultaneously is almost certainly
+    # a caller bug (which one wins?) so we fail fast with a 422 naming both
+    # params so the fix is obvious.
+    if tag is not None and tags:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Parameters `tag` and `tags` are mutually exclusive. "
+                "Use `tag=X` for a single-tag filter OR `tags=a&tags=b` "
+                "for multi-tag AND filtering — not both."
+            ),
+        )
+
     conditions = []
     params: list = []
 
@@ -253,6 +276,14 @@ async def list_entries(
     if tag:
         conditions.append("tags @> %s::text[]")
         params.append([tag])
+
+    if tags:
+        # AND semantics: entry.tags must be a superset of the requested
+        # list. The `@>` operator on `text[]` is backed by the GIN index
+        # on entries.tags (migration 001_core.sql), so this stays efficient
+        # at scale.
+        conditions.append("tags @> %s::text[]")
+        params.append(list(tags))
 
     where_clause = ""
     if conditions:
