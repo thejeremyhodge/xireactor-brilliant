@@ -17,21 +17,61 @@ the tool handler before we ever get here.
 import os
 
 import httpx
+import psycopg
+
+
+def _resolve_api_base_url() -> str:
+    """Resolve the API's outbound-callable public base URL.
+
+    Resolution order — first non-empty wins:
+
+    1. ``brilliant_settings.api_public_url`` — populated at API boot from
+       its own ``$RENDER_EXTERNAL_URL`` (migration 032). This is the
+       authoritative source on Render, where ``fromService.property:host``
+       only yields the internal service name (``brilliant-api``) that is
+       NOT publicly routable.
+    2. ``BRILLIANT_API_PUBLIC_URL`` — explicit operator override.
+    3. ``BRILLIANT_BASE_URL`` — legacy env var. On Render this is the bare
+       internal hostname; we prepend ``https://`` if no scheme is present.
+       Kept for local dev (``http://localhost:8010``) and custom deploys.
+    4. ``http://localhost:8010`` — local-dev last-resort default.
+
+    DB read is a one-time cost at client construction (module import in
+    ``remote_server.py`` / ``server.py``). A missing ``DATABASE_URL``, an
+    unreachable DB, or a pre-032 schema all fall through silently to the
+    env-var tier — tests and stdio-only deployments are unaffected.
+    """
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if dsn:
+        try:
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT api_public_url FROM brilliant_settings WHERE id = 1"
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        return str(row[0]).rstrip("/")
+        except Exception:  # noqa: BLE001 — pre-032 schema or DB down → env fallback
+            pass
+
+    raw = os.environ.get("BRILLIANT_API_PUBLIC_URL", "").strip()
+    if raw:
+        if not raw.startswith(("http://", "https://")):
+            raw = f"https://{raw}"
+        return raw.rstrip("/")
+
+    raw = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").strip()
+    if raw and not raw.startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+    return raw.rstrip("/")
 
 
 class BrilliantClient:
     """Async HTTP client for the Brilliant REST API."""
 
     def __init__(self):
-        # On Render, BRILLIANT_BASE_URL comes from fromService.property:host
-        # which returns the bare internal service name (e.g. "brilliant-api")
-        # with no scheme. httpx rejects schemeless URLs with a protocol
-        # error, so prepend https:// when absent. Mirrors the resolution
-        # logic in remote_server.py::_resolve_api_public_url (step 3).
-        raw = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").strip()
-        if raw and not raw.startswith(("http://", "https://")):
-            raw = f"https://{raw}"
-        self.base_url = raw.rstrip("/")
+        self.base_url = _resolve_api_base_url()
         # Service-role key. The MCP must present a service-typed key for
         # ``X-Act-As-User`` to be honored upstream. Empty string is a
         # legitimate local-dev value (stdio transport against a dev API
