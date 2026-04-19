@@ -17,6 +17,7 @@ from __future__ import annotations
 import fnmatch
 import io
 import tarfile
+import zipfile
 from typing import Iterator
 
 # Directories that are always excluded regardless of user-provided patterns.
@@ -138,3 +139,92 @@ def iter_tarball_md(
                 content = raw.decode("utf-8", errors="replace")
 
             yield rel_path, content
+
+
+def iter_zip_md(
+    zip_bytes: bytes,
+    excludes: list[str],
+    max_uncompressed: int,
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(rel_path, content)`` for each `.md` file in the zip archive.
+
+    Mirror of ``iter_tarball_md`` for ZIP archives — the archive most
+    non-technical users produce by right-click → compress on macOS / Windows.
+    Streams one entry at a time via ``ZipFile.read`` and enforces the same
+    uncompressed-bytes ceiling as a zip-bomb guard.
+
+    Raises ``ValueError`` if cumulative uncompressed bytes exceed
+    ``max_uncompressed``.
+    """
+    total_bytes = 0
+    buffer = io.BytesIO(zip_bytes)
+
+    with zipfile.ZipFile(buffer, mode="r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+
+            rel_path = info.filename
+            if rel_path.startswith("./"):
+                rel_path = rel_path[2:]
+
+            # macOS Finder zip wraps the contents in a top-level folder
+            # ("MyVault/Notes/foo.md") and also injects __MACOSX/ AppleDouble
+            # metadata. Drop the metadata; keep the wrapping folder intact —
+            # the import pipeline handles base_path stripping separately.
+            if rel_path.startswith("__MACOSX/") or rel_path.endswith("/.DS_Store"):
+                continue
+
+            if not rel_path.endswith(".md"):
+                continue
+
+            if should_exclude(rel_path, excludes):
+                continue
+
+            total_bytes += info.file_size
+            if total_bytes > max_uncompressed:
+                raise ValueError(
+                    f"Zip exceeds max_uncompressed limit of "
+                    f"{max_uncompressed} bytes"
+                )
+
+            raw = zf.read(info)
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                content = raw.decode("utf-8", errors="replace")
+
+            yield rel_path, content
+
+
+# Magic-byte signatures for archive sniffing. Both are stable, public-format
+# headers; treating them as the source of truth (vs. file extension) means a
+# `.zip` mis-named as `.tar.gz` still routes correctly.
+_ZIP_MAGIC = b"PK\x03\x04"
+_ZIP_EMPTY_MAGIC = b"PK\x05\x06"  # empty zip
+_ZIP_SPANNED_MAGIC = b"PK\x07\x08"  # spanned zip (rare)
+
+
+def is_zip_archive(data: bytes) -> bool:
+    """Return True if the byte buffer starts with a ZIP signature."""
+    if len(data) < 4:
+        return False
+    head = data[:4]
+    return head in (_ZIP_MAGIC, _ZIP_EMPTY_MAGIC, _ZIP_SPANNED_MAGIC)
+
+
+def iter_archive_md(
+    data: bytes,
+    excludes: list[str],
+    max_uncompressed: int,
+) -> Iterator[tuple[str, str]]:
+    """Dispatcher: route to ``iter_zip_md`` or ``iter_tarball_md`` by magic.
+
+    Sniffs the leading bytes to pick the right walker. The two iterators
+    have an identical signature and yield contract, so callers don't need
+    to care which format the user uploaded.
+    """
+    if is_zip_archive(data):
+        yield from iter_zip_md(data, excludes, max_uncompressed)
+    else:
+        yield from iter_tarball_md(data, excludes, max_uncompressed)

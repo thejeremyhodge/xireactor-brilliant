@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import tarfile
+import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
@@ -22,7 +23,7 @@ from services.frontmatter import (
 )
 from services.links import sync_entry_links
 from services.storage import get_storage
-from services.vault_walker import iter_tarball_md, resolve_exclude_patterns
+from services.vault_walker import iter_archive_md, resolve_exclude_patterns
 from models import (
     ImportFile,
     ImportRequest,
@@ -822,7 +823,7 @@ async def import_vault_from_blob(
         excludes = resolve_exclude_patterns(body.excludes)
         files_data: list[ImportFile] = []
         try:
-            for rel_path, content in iter_tarball_md(
+            for rel_path, content in iter_archive_md(
                 data, excludes, max_uncompressed
             ):
                 files_data.append(
@@ -833,10 +834,10 @@ async def import_vault_from_blob(
             # writing entries/staging rows, so rolling out of the
             # ``async with get_db(user)`` block leaves the DB untouched.
             raise HTTPException(status_code=413, detail=str(exc))
-        except tarfile.TarError as exc:  # pragma: no cover - defensive
+        except (tarfile.TarError, zipfile.BadZipFile) as exc:  # pragma: no cover - defensive
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid tarball: {exc}",
+                detail=f"Invalid archive: {exc}",
             )
 
         # --- Step 5: defaults + dispatch to shared core pipeline ---
@@ -931,13 +932,10 @@ async def import_vault_upload(
     sha256_hex = hasher.hexdigest()
     data = buf.getvalue()
 
-    # Tarball content type — browsers typically send application/gzip or
-    # application/x-tar; fall back to octet-stream so the blobs row always
-    # has a non-null value.
-    effective_ct = (
-        file.content_type
-        or "application/gzip"
-    )
+    # Archive content type — browsers typically send application/zip,
+    # application/gzip, or application/x-tar; fall back to octet-stream so
+    # the blobs row always has a non-null value regardless of format.
+    effective_ct = file.content_type or "application/octet-stream"
 
     # --- Step 2: parse excludes (multipart Form field is a single string) ---
     # Accept comma-separated globs for convenience; None / empty strings
@@ -1023,7 +1021,7 @@ async def import_vault_upload(
         default_excludes = resolve_exclude_patterns(excludes_list)
         files_data: list[ImportFile] = []
         try:
-            for rel_path, content in iter_tarball_md(
+            for rel_path, content in iter_archive_md(
                 data, default_excludes, max_uncompressed
             ):
                 files_data.append(
@@ -1031,10 +1029,10 @@ async def import_vault_upload(
                 )
         except ValueError as exc:
             raise HTTPException(status_code=413, detail=str(exc))
-        except tarfile.TarError as exc:
+        except (tarfile.TarError, zipfile.BadZipFile) as exc:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid tarball: {exc}",
+                detail=f"Invalid archive: {exc}",
             )
 
         # --- Step 5: defaults + dispatch to shared core pipeline ---
@@ -1129,9 +1127,9 @@ def _render_vault_upload_page() -> str:
 <body>
   <h1>Import an Obsidian vault</h1>
   <p class="sub">
-    Upload a tarball (<code>.tgz</code> / <code>.tar.gz</code>) of your
-    vault. The file is parsed server-side and imported into your knowledge
-    base in a single batch.
+    Upload a <code>.zip</code> or tarball (<code>.tgz</code> /
+    <code>.tar.gz</code>) of your vault. The file is parsed server-side
+    and imported into your knowledge base in a single batch.
   </p>
 
   <div id="auth-missing" class="panel info hidden">
@@ -1154,13 +1152,14 @@ def _render_vault_upload_page() -> str:
     </div>
 
     <div class="field">
-      <label for="file">Vault tarball</label>
+      <label for="file">Vault archive</label>
       <input id="file" name="file" type="file"
-             accept=".tgz,.tar.gz,.tar,application/gzip,application/x-tar"
+             accept=".zip,.tgz,.tar.gz,.tar,application/zip,application/gzip,application/x-tar"
              required>
       <div class="hint">
-        Create one locally with:
-        <code>tar czf vault.tgz -C path/to/vault .</code>
+        Easiest: right-click your vault folder &rarr; <em>Compress</em> (macOS) or
+        <em>Send to &rarr; Compressed (zipped) folder</em> (Windows).
+        Tarball alternative: <code>tar czf vault.tgz -C path/to/vault .</code>
       </div>
     </div>
 

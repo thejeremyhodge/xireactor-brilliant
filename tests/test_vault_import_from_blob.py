@@ -898,6 +898,68 @@ def test_browser_upload_enforces_size_cap(api_with_small_tarball_cap, admin_key)
     )
 
 
+def _build_zip(files: list[tuple[str, bytes]]) -> bytes:
+    """Build a `.zip` archive in memory from ``[(rel_path, content)]``.
+
+    Mirrors `_build_tarball` so the zip-format coverage uses the same
+    fixture-shaped payload the tarball tests do.
+    """
+    import io as _io
+    import zipfile as _zipfile
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, mode="w", compression=_zipfile.ZIP_DEFLATED) as zf:
+        for path, content in files:
+            zf.writestr(path, content)
+    return buf.getvalue()
+
+
+def test_browser_upload_zip_happy_path(admin_key):
+    """Multipart POST of a 2-file `.zip` → 201 with non-null batch_id and
+    ``created + staged == 2``.
+
+    Validates the magic-byte sniff in `iter_archive_md` routes zips into
+    the zip walker — the user-friendly path for non-technical operators
+    who right-click → Compress on macOS / Windows.
+    """
+    run_tag = uuid.uuid4().hex[:8]
+    zip_bytes = _build_zip(
+        [
+            (
+                "zip-note.md",
+                (
+                    f"---\n"
+                    f"title: Zip Note {run_tag}\n"
+                    f"content_type: context\n"
+                    f"---\n"
+                    f"# Zip Note {run_tag}\n\nFrom a zip.\n"
+                ).encode(),
+            ),
+            (
+                "subdir/zip-nested.md",
+                f"# Nested Zip {run_tag}\n\nNested.\n".encode(),
+            ),
+        ]
+    )
+
+    base = f"test-browser-zip-{run_tag}"
+    headers = _auth(admin_key)
+    resp = requests.post(
+        f"{BASE_URL}/import/vault-upload",
+        headers=headers,
+        files={"file": ("vault.zip", zip_bytes, "application/zip")},
+        data={"source_vault": base, "base_path": base},
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body.get("batch_id"), f"missing batch_id in response: {body}"
+    assert body["created"] + body["staged"] == 2, (
+        f"expected 2 imported files (both .md), "
+        f"got created={body['created']} staged={body['staged']} body={body}"
+    )
+
+
 # ----------------------------------------------------------------------------
 # Subprocess harness for the MCP-tool-level validation test.
 # ----------------------------------------------------------------------------

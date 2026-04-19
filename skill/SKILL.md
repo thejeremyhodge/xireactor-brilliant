@@ -425,18 +425,19 @@ For per-entry creates from a conversation or a single inbox file, use `create_en
 
 #### Bulk import from Co-work (or any remote MCP)
 
-**Don't try to ship a real vault through the MCP protocol.** Claude's per-turn output cap (~32K tokens ≈ ~100KB) is smaller than a real vault tarball — a typical 1k-file Obsidian vault is ~165KB compressed, ~225KB base64-encoded. The base64-over-MCP path that earlier versions of this skill described works only for toy vaults under ~50KB tarball.
+**Don't try to ship a real vault through the MCP protocol.** Claude's per-turn output cap (~32K tokens ≈ ~100KB) is smaller than a real vault archive — a typical 1k-file Obsidian vault is ~165KB compressed, ~225KB base64-encoded. The base64-over-MCP path that earlier versions of this skill described works only for toy vaults under ~50KB tarball.
 
 For real vaults, **direct the user to the browser upload page** at `https://<their-api-host>/import/vault`. The page is a first-class, always-available route that:
 
-- POSTs the tarball straight to the API as multipart — bypasses the MCP protocol, the Co-work bash sandbox outbound allowlist, and the Claude per-turn output cap entirely
-- Reuses the same server-side tar walk + import pipeline as `import_vault_from_blob`
+- Accepts either `.zip` (right-click → Compress on macOS / Send to → Compressed folder on Windows) or `.tgz` / `.tar.gz` — server-side magic-byte sniff routes to the right walker
+- POSTs the archive straight to the API as multipart — bypasses the MCP protocol, the Co-work bash sandbox outbound allowlist, and the Claude per-turn output cap entirely
+- Reuses the same server-side import pipeline as `import_vault_from_blob`
 - Renders the `{created, staged, batch_id}` counts inline on success, with the rollback command for undo
 - Auto-attaches the user's API key from `localStorage` (or accepts a paste-in if missing)
 
 What to tell the user:
 
-> "For a vault this size, open `https://<your-api-host>/import/vault` in a browser, drop the `.tgz` in, and submit. I can't stream that many bytes through this connection — Claude's per-turn output cap blocks it."
+> "For a vault this size, open `https://<your-api-host>/import/vault` in a browser, drop a `.zip` of your vault folder in (right-click → Compress), and submit. I can't stream that many bytes through this connection — Claude's per-turn output cap blocks it."
 
 The `/setup` credentials page (end of first-run) already cross-links to `/import/vault`, so first-time users are nudged into this flow naturally.
 
@@ -637,7 +638,7 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `process_staging` | Batch-evaluate all pending items (admin only) |
 | `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id`. **Local MCP only** — not registered on remote Render deploys; use `import_vault_from_blob` there. |
 | `upload_attachment` | Upload a single file (PDFs, images, small docs) to `POST /attachments` and return `blob_id` + dedup info. Two modes: `path=` (local stdio MCP only — server must be able to read the file) or `content_base64=` + `filename=` (inline bytes; bounded by Claude's per-turn output cap, ~50KB practical ceiling). For attachments + small files only — **not for bulk vault imports**: real vaults exceed the per-turn output cap, so direct the user to the browser page at `/import/vault` instead |
-| `import_vault_from_blob` | Bulk-import a previously-uploaded vault tarball by `blob_id`; server-side tar walk, same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
+| `import_vault_from_blob` | Bulk-import a previously-uploaded vault archive by `blob_id`; server-side `.zip` or `.tgz` walk (magic-byte sniff), same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
