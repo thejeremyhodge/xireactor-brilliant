@@ -23,10 +23,11 @@ uv pip install -r requirements.txt
 | Env Var | Default | Description |
 |---|---|---|
 | `BRILLIANT_BASE_URL` | `http://localhost:8010` | Brilliant API base URL |
-| `BRILLIANT_API_KEY` | *(required)* | Bearer token for API auth |
+| `BRILLIANT_SERVICE_API_KEY` | *(required)* | Service-role bearer token; MCP acts-as the OAuth-bound user via `X-Act-As-User` |
 | `MCP_BASE_URL` | `http://localhost:8011` | External URL for OAuth issuer (remote only) |
 | `MCP_PORT` | `8001` | Port for remote HTTP server |
 | `TOKEN_EXPIRY_SECONDS` | `3600` | OAuth access token lifetime |
+| `OAUTH_HANDOFF_SECRET` | *(required remote)* | HMAC secret shared with API for `/oauth/login` → `/oauth/continue` handoff |
 
 ## Claude Desktop Integration (Stdio)
 
@@ -40,7 +41,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "args": ["/absolute/path/to/xireactor-brilliant/mcp/server.py"],
       "env": {
         "PYTHONUNBUFFERED": "1",
-        "BRILLIANT_API_KEY": "bkai_adm1_testkey_admin"
+        "BRILLIANT_SERVICE_API_KEY": "bkai_adm1_testkey_admin"
       }
     }
   }
@@ -61,30 +62,42 @@ Restart Claude Desktop after editing the config. The 11 Brilliant tools will app
 
 1. Go to your Claude organization settings (admin access required)
 2. Navigate to **Integrations** → **Custom connectors**
-3. Add a new connector:
+3. Add a new connector with all four fields populated from `/setup/done`:
    - **URL:** `http://localhost:8011/mcp` (or your deployed MCP URL)
    - **Name:** Brilliant Knowledge Base
-4. Claude will auto-discover OAuth endpoints via `/.well-known/oauth-authorization-server`
-5. The first connection triggers Dynamic Client Registration — no manual client ID setup needed
+   - **Client ID:** `brilliant_...` (minted by `/setup`)
+   - **Client Secret:** (minted by `/setup`; treat as a password)
+4. Dynamic Client Registration (DCR) is disabled — you must paste the
+   pre-provisioned client_id/client_secret from `/setup/done` or
+   `/auth/login`.
+5. On first connect, Claude opens a browser window that redirects to the
+   API's `/oauth/login` page. The user logs in with email + password;
+   only after that does the MCP issue an access token bound to that
+   user's identity.
 
 ### Server-side setup
 
-1. Provision a Brilliant API key for the org:
-   - The key determines which org's data is accessible
-   - One connector instance = one org's permissions (RLS-enforced)
+1. Run `/setup` on the API service to mint the workspace credentials
+   (admin user, admin API key, OAuth client_id/client_secret, and the
+   service-role API key logged to the API container's startup log).
 
-2. Set the API key as an environment variable on the MCP container:
+2. Set the service-role key as an environment variable on the MCP
+   container so it can act-as the OAuth-bound user on every API call:
    ```bash
-   BRILLIANT_API_KEY=bkai_XXXX_your_org_key
+   BRILLIANT_SERVICE_API_KEY=bkai_svc_XXXX_service_key
+   OAUTH_HANDOFF_SECRET=<same shared secret as API service>
    ```
 
-3. Deploy via docker-compose (see below)
+3. Deploy via docker-compose (see below). On Render, both variables
+   are wired automatically via `render.yaml`'s `fromService.envVarKey`
+   wiring.
 
 ### Deploy with Docker Compose
 
 ```bash
 # Set required env vars
-export BRILLIANT_API_KEY=bkai_XXXX_your_org_key
+export BRILLIANT_SERVICE_API_KEY=bkai_svc_XXXX_service_key
+export OAUTH_HANDOFF_SECRET=$(openssl rand -hex 32)
 export MCP_BASE_URL=http://localhost:8011  # or your deployed URL
 
 # Start all services
@@ -190,7 +203,7 @@ your-domain.example.com {
 
 ```bash
 # Stdio transport (against live API)
-BRILLIANT_API_KEY=bkai_adm1_testkey_admin python test_tools.py
+BRILLIANT_SERVICE_API_KEY=bkai_adm1_testkey_admin python test_tools.py
 
 # Remote transport (start server first, or use docker-compose)
 MCP_TEST_URL=http://localhost:8011 python test_remote.py

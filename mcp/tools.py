@@ -1,4 +1,23 @@
-"""Shared Brilliant MCP tool definitions — register on any FastMCP instance."""
+"""Shared Brilliant MCP tool definitions — register on any FastMCP instance.
+
+Sprint 0039 (T-0229): every tool handler pulls the OAuth-bound ``user_id``
+off the authenticated ``AccessToken`` (a ``BrilliantAccessToken`` from
+``remote_server.py``) and passes it as ``act_as=user_id`` to every
+``api.*`` call. The API then acts-as that user while authenticating with
+the MCP's service-role key (see ``mcp/client.py``).
+
+Two transports share this module:
+
+* **Remote (Streamable HTTP / OAuth)** — ``get_access_token()`` returns a
+  ``BrilliantAccessToken`` with ``user_id`` bound via the /authorize ->
+  /oauth/login handoff. If ``user_id`` is ``None`` on a remote-transport
+  request we raise ``ToolError`` (surfaces as a tool error response; no
+  API call is made, no service-level write happens).
+* **Local stdio (Claude Desktop)** — the request has no authenticated
+  user. ``get_access_token()`` returns ``None`` and we skip the
+  ``act_as`` param. The local user's single-tenant API key is assumed
+  to be set via env for the stdio transport.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +26,9 @@ import mimetypes
 import sys
 from pathlib import Path
 
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from client import BrilliantClient
 
@@ -28,8 +49,43 @@ for _tool_dir in _CANDIDATE_TOOL_DIRS:
         break
 
 
+def _resolve_act_as_user_id() -> str | None:
+    """Return the OAuth-bound ``user_id`` for the in-flight tool call, or None.
+
+    Behaviour matrix:
+
+    * Remote (OAuth) transport, token carries ``user_id`` → return the
+      UUID string. Tool handler passes ``act_as=<uuid>`` on every
+      outbound API call, API acts-as that user under RLS.
+    * Remote (OAuth) transport, token with ``user_id is None`` →
+      raise ``ToolError``. This is a security invariant: a bearer
+      token issued post-sprint must always have a bound user, and
+      falling through to the MCP's service identity would let any
+      valid-but-unbound token hit the API with service-level scope.
+    * Local stdio transport, no authenticated user →
+      ``get_access_token()`` returns ``None``. We return ``None`` so
+      the tool skips ``X-Act-As-User`` and the API falls back to the
+      presenting key's identity. Local stdio is single-user by
+      design, so this preserves pre-0039 behaviour.
+    """
+    access_token = get_access_token()
+    if access_token is None:
+        # Stdio / no auth context — preserved pre-0039 behaviour.
+        return None
+    # Remote path. The token should be a ``BrilliantAccessToken`` with
+    # ``user_id`` populated; ``getattr`` is defensive against any stock
+    # ``AccessToken`` sneaking through (would still raise below).
+    user_id = getattr(access_token, "user_id", None)
+    if not user_id:
+        raise ToolError(
+            "Authenticated token is missing a bound user_id. "
+            "Re-authenticate via the OAuth login flow."
+        )
+    return user_id
+
+
 def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
-    """Register all 18 Brilliant tools on the given FastMCP server instance."""
+    """Register all Brilliant tools on the given FastMCP server instance."""
 
     # -------------------------------------------------------------------
     # Read tools
@@ -60,6 +116,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Content types: context, project, meeting, decision, intelligence, daily,
         resource, department, team, system, onboarding.
         """
+        user_id = _resolve_act_as_user_id()
         params = {"limit": limit, "offset": offset}
         if q:
             params["q"] = q
@@ -73,7 +130,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["tag"] = tag
         if fuzzy:
             params["fuzzy"] = "true"
-        return await api.get("/entries", params=params)
+        return await api.get("/entries", params=params, act_as=user_id)
 
     @mcp.tool()
     async def get_entry(entry_id: str) -> dict:
@@ -82,7 +139,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Returns the full entry including content, metadata, tags, and version info.
         Returns 404 if the entry doesn't exist or is hidden by your permissions.
         """
-        return await api.get(f"/entries/{entry_id}")
+        user_id = _resolve_act_as_user_id()
+        return await api.get(f"/entries/{entry_id}", act_as=user_id)
 
     @mcp.tool()
     async def get_index(
@@ -103,12 +161,13 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
           path — logical_path prefix (e.g. 'Projects/' for project entries)
           content_type — specific type (e.g. 'decision', 'meeting')
         """
+        user_id = _resolve_act_as_user_id()
         params: dict = {"depth": depth}
         if path is not None:
             params["path"] = path
         if content_type is not None:
             params["content_type"] = content_type
-        return await api.get("/index", params=params)
+        return await api.get("/index", params=params, act_as=user_id)
 
     @mcp.tool()
     async def get_types() -> dict:
@@ -117,7 +176,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Returns canonical types and their aliases. When creating entries,
         use canonical type names (not aliases).
         """
-        return await api.get("/types")
+        user_id = _resolve_act_as_user_id()
+        return await api.get("/types", act_as=user_id)
 
     @mcp.tool()
     async def get_neighbors(entry_id: str, depth: int = 1) -> dict:
@@ -127,7 +187,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         with cycle prevention. Bidirectional links (relates_to, contradicts) are
         traversed both ways; directional links follow outgoing direction only.
         """
-        return await api.get(f"/entries/{entry_id}/links", params={"depth": depth})
+        user_id = _resolve_act_as_user_id()
+        return await api.get(
+            f"/entries/{entry_id}/links",
+            params={"depth": depth},
+            act_as=user_id,
+        )
 
     @mcp.tool()
     async def session_init() -> dict:
@@ -162,7 +227,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Call this at the start of every conversation to load ambient context
         and check for items requiring your attention.
         """
-        return await api.get("/session-init")
+        user_id = _resolve_act_as_user_id()
+        return await api.get("/session-init", act_as=user_id)
 
     @mcp.tool()
     async def suggest_tags(content: str, limit: int = 10) -> dict:
@@ -182,10 +248,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         ``{"suggestions": []}`` — not an error. Use this before creating
         an entry to stay consistent with the org's existing taxonomy.
         """
-        return await api.post("/tags/suggest", json={
-            "content": content,
-            "limit": limit,
-        })
+        user_id = _resolve_act_as_user_id()
+        return await api.post(
+            "/tags/suggest",
+            json={"content": content, "limit": limit},
+            act_as=user_id,
+        )
 
     # -------------------------------------------------------------------
     # Write tools
@@ -217,6 +285,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Sensitivity levels: system, strategic, operational, private, project,
         meeting, shared.
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {
             "title": title,
             "content": content,
@@ -234,7 +303,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             body["domain_meta"] = domain_meta
         if project_id is not None:
             body["project_id"] = project_id
-        return await api.post("/entries", json=body)
+        return await api.post("/entries", json=body, act_as=user_id)
 
     @mcp.tool()
     async def update_entry(
@@ -257,6 +326,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Only include fields you want to change. Automatically creates a version
         snapshot before applying changes and bumps the version number.
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {}
         for field in [
             "title", "content", "summary", "content_type",
@@ -265,7 +335,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             val = locals()[field]
             if val is not None:
                 body[field] = val
-        return await api.put(f"/entries/{entry_id}", json=body)
+        return await api.put(f"/entries/{entry_id}", json=body, act_as=user_id)
 
     @mcp.tool()
     async def delete_entry(entry_id: str) -> dict:
@@ -276,7 +346,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         The entry remains in the database but is excluded from search and index.
         """
-        return await api.delete(f"/entries/{entry_id}")
+        user_id = _resolve_act_as_user_id()
+        return await api.delete(f"/entries/{entry_id}", act_as=user_id)
 
     @mcp.tool()
     async def append_entry(
@@ -293,10 +364,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Atomically concatenates new content after a separator (default: double
         newline). Creates a version snapshot before applying.
         """
-        return await api.patch(f"/entries/{entry_id}/append", json={
-            "content": content,
-            "separator": separator,
-        })
+        user_id = _resolve_act_as_user_id()
+        return await api.patch(
+            f"/entries/{entry_id}/append",
+            json={"content": content, "separator": separator},
+            act_as=user_id,
+        )
 
     @mcp.tool()
     async def create_link(
@@ -320,6 +393,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
           part_of      — source is a component of target
           tagged_with  — source is categorized by target
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {
             "target_entry_id": target_entry_id,
             "link_type": link_type,
@@ -327,7 +401,11 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         }
         if metadata is not None:
             body["metadata"] = metadata
-        return await api.post(f"/entries/{source_entry_id}/links", json=body)
+        return await api.post(
+            f"/entries/{source_entry_id}/links",
+            json=body,
+            act_as=user_id,
+        )
 
     # -------------------------------------------------------------------
     # Governance tools
@@ -375,6 +453,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         For update/append: pass `expected_version` to enable optimistic concurrency.
         Returns 409 if the entry has been modified since you last read it.
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {
             "target_path": target_path,
             "change_type": change_type,
@@ -392,7 +471,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             body["proposed_meta"] = proposed_meta
         if expected_version is not None:
             body["expected_version"] = expected_version
-        return await api.post("/staging", json=body)
+        return await api.post("/staging", json=body, act_as=user_id)
 
     @mcp.tool()
     async def list_staging(
@@ -411,6 +490,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
           change_type — create, update, append, delete
           since — ISO datetime, returns items created on or after this time
         """
+        user_id = _resolve_act_as_user_id()
         params: dict = {"status": status}
         if target_path is not None:
             params["target_path"] = target_path
@@ -418,7 +498,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["change_type"] = change_type
         if since is not None:
             params["since"] = since
-        return await api.get("/staging", params=params)
+        return await api.get("/staging", params=params, act_as=user_id)
 
     @mcp.tool()
     async def review_staging(
@@ -435,11 +515,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Set action to 'approve' or 'reject'. On approval, the proposed change is
         applied to the knowledge base. A reason is recorded in the audit log.
         """
+        user_id = _resolve_act_as_user_id()
         endpoint = f"/staging/{staging_id}/{action}"
         body: dict = {}
         if reason is not None:
             body["reason"] = reason
-        return await api.post(endpoint, json=body if body else None)
+        return await api.post(endpoint, json=body if body else None, act_as=user_id)
 
     @mcp.tool()
     async def process_staging() -> dict:
@@ -460,7 +541,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Returns counts (approved, flagged, rejected) and per-item details
         including governance tier for each processed item.
         """
-        return await api.post("/staging/process")
+        user_id = _resolve_act_as_user_id()
+        return await api.post("/staging/process", act_as=user_id)
 
     # -------------------------------------------------------------------
     # Onboarding tools
@@ -483,13 +565,21 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         This is a single-use action — failed attempts invalidate the invite.
         """
-        return await api.post("/invitations/redeem", json={
-            "invite_code": invite_code,
-            "token": token,
-            "email": email,
-            "display_name": display_name,
-            "password": password,
-        }, api_key="")
+        # Invite redemption is unauthenticated by design — it is the flow
+        # that mints the very first key for a new user. We pass an empty
+        # api_key override (so no ``Authorization`` header is trusted) and
+        # deliberately skip ``act_as`` since there is no bound user yet.
+        return await api.post(
+            "/invitations/redeem",
+            json={
+                "invite_code": invite_code,
+                "token": token,
+                "email": email,
+                "display_name": display_name,
+                "password": password,
+            },
+            api_key="",
+        )
 
     # -------------------------------------------------------------------
     # Import tools
@@ -538,6 +628,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         max_files) returns `{"error": True, "detail": "..."}` without
         touching the server.
         """
+        user_id = _resolve_act_as_user_id()
         try:
             from vault_parse import (  # type: ignore
                 build_payloads,
@@ -602,6 +693,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
                     "files": payloads,
                     "base_path": effective_base,
                 },
+                act_as=user_id,
             )
         else:
             response = await api.post(
@@ -612,6 +704,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
                     "source_vault": effective_source,
                     "collisions": [],
                 },
+                act_as=user_id,
             )
 
         # Surface client-side read errors alongside the server response so
@@ -632,7 +725,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Use the batch_id returned from import_vault to identify which batch
         to roll back. Cannot roll back an already rolled-back batch (returns 409).
         """
-        return await api.delete(f"/import/{batch_id}")
+        user_id = _resolve_act_as_user_id()
+        return await api.delete(f"/import/{batch_id}", act_as=user_id)
 
     # -------------------------------------------------------------------
     # Attachment tools
@@ -680,6 +774,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Uploading identical bytes twice within the same org returns
         `dedup: true` with the original blob_id.
         """
+        user_id = _resolve_act_as_user_id()
         file_path = Path(path)
         if not file_path.is_file():
             return {
@@ -710,7 +805,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         # matches what we sent.
         params["content_type"] = effective_ct
 
-        return await api.post_multipart("/attachments", files=files, params=params)
+        return await api.post_multipart(
+            "/attachments",
+            files=files,
+            params=params,
+            act_as=user_id,
+        )
 
     # -------------------------------------------------------------------
     # Analytics tools (admin-only)
@@ -758,21 +858,28 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         Admin-only — non-admin callers get {"error": "admin-only", ...}.
         """
+        user_id = _resolve_act_as_user_id()
         if kind == "top-entries":
             params: dict = {"since": since, "limit": limit}
             if actor_type is not None:
                 params["actor_type"] = actor_type
-            return _coerce_admin_error(await api.get("/analytics/top-entries", params=params))
+            return _coerce_admin_error(
+                await api.get("/analytics/top-entries", params=params, act_as=user_id)
+            )
 
         if kind == "top-endpoints":
             params = {"since": since, "limit": limit}
-            return _coerce_admin_error(await api.get("/analytics/top-endpoints", params=params))
+            return _coerce_admin_error(
+                await api.get("/analytics/top-endpoints", params=params, act_as=user_id)
+            )
 
         if kind == "session-depth":
             params = {"since": since}
             if actor_id is not None:
                 params["actor_id"] = actor_id
-            return _coerce_admin_error(await api.get("/analytics/session-depth", params=params))
+            return _coerce_admin_error(
+                await api.get("/analytics/session-depth", params=params, act_as=user_id)
+            )
 
         if kind == "summary":
             top_entries_params: dict = {"since": since, "limit": limit}
@@ -784,9 +891,9 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
                 session_depth_params["actor_id"] = actor_id
 
             top_entries, top_endpoints, session_depth = await asyncio.gather(
-                api.get("/analytics/top-entries", params=top_entries_params),
-                api.get("/analytics/top-endpoints", params=top_endpoints_params),
-                api.get("/analytics/session-depth", params=session_depth_params),
+                api.get("/analytics/top-entries", params=top_entries_params, act_as=user_id),
+                api.get("/analytics/top-endpoints", params=top_endpoints_params, act_as=user_id),
+                api.get("/analytics/session-depth", params=session_depth_params, act_as=user_id),
             )
 
             # If any sub-call returned 403 (admin-only), surface the same
