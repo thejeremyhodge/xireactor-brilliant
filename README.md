@@ -235,15 +235,25 @@ Sources: [render.com/pricing](https://render.com/pricing), [render.com/docs/free
 
 ### End-to-end flow
 
-1. **Click the button.** Render prompts for `ADMIN_EMAIL` — the only user-provided input. Password and API key are captured after deploy.
+1. **Click the button.** Render prompts for `ADMIN_EMAIL` — the only user-provided input. Password, API key, and OAuth client credentials are all captured after deploy.
 2. **Wait ~3 minutes** while Render builds the two Docker images, provisions the database, runs migrations (via `preDeployCommand`), and boots the services.
 3. **Visit the api service URL.** The root route redirects to `/setup` because the `first_run_complete` latch is still false.
-4. **Choose a password** on `/setup`. Submit → credentials page renders inline with: your admin email, a freshly-minted API key, the MCP connector URL (wired from the `brilliant-mcp` service), and a login URL. Copy buttons + a `brilliant-credentials.txt` download button save everything in one click. The `/setup` route then 404s forever.
-5. **Paste the MCP URL into Claude** (Co-work or Claude Code) to connect. Use the API key as the Bearer token for direct REST calls against `brilliant-api`.
+4. **Choose a password** on `/setup`. Submit → credentials page renders inline with **six fields**: admin email, API key, OAuth `client_id`, OAuth `client_secret`, MCP connector URL, and a login URL. Copy buttons + a `brilliant-credentials.txt` download button save everything in one click. The `/setup` route then 404s forever.
+5. **Connect Claude Co-work** via custom connector — paste **four fields**: a name, the MCP URL, the `client_id`, and the `client_secret`. Hit connect. Claude opens a browser tab to the api's `/oauth/login` page; enter the admin email + password you chose at `/setup`. Claude flashes "connected" and all MCP tool calls are now scoped to that user's RLS context.
 
 ### Lost your API key?
 
-Visit `https://<your-api-host>/auth/login` and sign in with the email and password you chose at `/setup`. Signing in **rotates the key** — all prior keys are invalidated, a fresh one is issued, and the same `brilliant-credentials.txt` download is offered. This doubles as a panic button if you suspect a key leaked.
+Visit `https://<your-api-host>/auth/login` and sign in with the email and password you chose at `/setup`. Signing in **rotates the API key** — all prior keys are invalidated, a fresh one is issued, and the six-field `brilliant-credentials.txt` download is offered. This doubles as a panic button if you suspect a key leaked. If you suspect the OAuth `client_secret` leaked, check the "Also rotate OAuth client secret" box before submitting — both secrets rotate atomically in one transaction. (Rotating `client_secret` invalidates every Claude connector provisioned against the old secret — re-paste the new one.)
+
+### Security model
+
+Three independent gates protect the knowledge base. Breaking any one of them does not grant access:
+
+1. **Pre-registered OAuth client** — the `client_id` + `client_secret` from `/setup` are required in the Claude Co-work custom connector. Dynamic Client Registration (DCR) is **disabled** on the MCP server; a stranger who discovers the public MCP URL cannot self-register a client. The secret is rotatable from `/auth/login`.
+2. **User login at `/authorize`** — the MCP's OAuth `authorize` endpoint does not auto-mint an access token. It redirects the user's browser to the api service's `/oauth/login` page, which requires email + password. The handoff back to the MCP is HMAC-SHA256 signed with a shared `OAUTH_HANDOFF_SECRET` that Render generates at deploy time and never exposes to operators.
+3. **Per-user RLS via `X-Act-As-User`** — the MCP authenticates to the api with a `key_type='service'` API key, but every tool call carries an `X-Act-As-User: <user_id>` header bound to the authenticated session. The api's auth middleware honors the header **only** from service keys; a non-service key presenting it returns 403. Downstream Postgres RLS (`SET LOCAL ROLE` + `app.user_id`) enforces per-user scope on every query.
+
+Consequence: three distinct credentials — the `client_secret` (rotatable), the user password, and the service API key (deploy-time rotatable via Render) — plus database-level RLS — gate every MCP tool call. The access log records the acting user, not the service identity.
 
 ### Escape valves
 
