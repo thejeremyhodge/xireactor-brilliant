@@ -31,11 +31,14 @@ Run
 
 from __future__ import annotations
 
+import base64
 import io
+import json
 import os
 import subprocess
 import sys
 import tarfile
+import textwrap
 import time
 import uuid
 from pathlib import Path
@@ -651,4 +654,237 @@ def test_compressed_cap_returns_413(api_with_small_tarball_cap, admin_key):
     assert after_count == before_count, (
         f"compressed-cap 413 leaked an import_batches row: "
         f"before={before_count} after={after_count}"
+    )
+
+
+# ----------------------------------------------------------------------------
+# Case 5 — inline-bytes upload (Sprint 0040a / T-0244)
+# ----------------------------------------------------------------------------
+#
+# The MCP tool ``upload_attachment`` gained a ``content_base64`` + ``filename``
+# mode so remote Co-work can transmit tarball bytes inline (the remote MCP
+# can't read Co-work's sandbox filesystem). Two shapes of coverage:
+#
+#   (a) + (b) ``test_inline_bytes_upload_chains_to_import_from_blob`` —
+#       encodes a tarball as base64, decodes it, uploads via HTTP multipart
+#       (the pathway the MCP tool takes after decoding), captures the
+#       ``blob_id``, and chains into ``POST /import/vault-from-blob``.
+#       Covers the wet-flow end-to-end at the server-contract level.
+#
+#   (c) ``test_mcp_tool_rejects_invalid_base64`` — invokes the MCP tool
+#       function via a subprocess with ``cwd=mcp/`` so the local ``mcp/``
+#       namespace does not shadow the installed ``mcp`` SDK. Verifies the
+#       400-shape error dict, ``detail`` mentions base64, and supplying
+#       neither / both of ``path`` / ``content_base64`` is also rejected.
+
+
+def test_inline_bytes_upload_chains_to_import_from_blob(admin_key):
+    """End-to-end coverage of the inline-bytes pathway (T-0244 ACs a + b).
+
+    Mirrors what ``upload_attachment(content_base64=..., filename=...)``
+    does: base64-decode the tarball and POST the bytes to ``/attachments``
+    as multipart. The decoded-bytes round-trip must match the original
+    tarball (byte-identical), the upload must return a ``blob_id``, and
+    that blob_id must chain cleanly into ``/import/vault-from-blob`` with
+    a non-empty ``{created, staged}`` count.
+    """
+    run_tag = uuid.uuid4().hex[:8]
+    tar_bytes = _unique_tarball(
+        [
+            (
+                "inline.md",
+                (
+                    f"---\n"
+                    f"title: Inline Note {run_tag}\n"
+                    f"content_type: context\n"
+                    f"---\n"
+                    f"# Inline Note {run_tag}\n\nBody.\n"
+                ).encode(),
+            ),
+            (
+                "nested/also.md",
+                f"# Nested {run_tag}\n\nNested body.\n".encode(),
+            ),
+        ]
+    )
+
+    # Round-trip through base64 (the MCP tool calls
+    # ``base64.b64decode(content_base64, validate=True)`` on the client
+    # string before forwarding the bytes to ``/attachments``).
+    b64 = base64.b64encode(tar_bytes).decode("ascii")
+    decoded = base64.b64decode(b64, validate=True)
+    assert decoded == tar_bytes, "base64 round-trip corrupted tarball bytes"
+
+    up = requests.post(
+        f"{BASE_URL}/attachments",
+        headers=_auth(admin_key),
+        files={"file": ("vault.tgz", decoded, "application/gzip")},
+        params={"content_type": "application/gzip", "digest": "false"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert up.status_code == 201, up.text
+    up_body = up.json()
+    blob_id = up_body.get("blob_id")
+    assert blob_id, f"upload response missing blob_id: {up_body}"
+    assert up_body.get("content_type") == "application/gzip"
+
+    base = f"test-inline-{run_tag}"
+    resp = _import_from_blob(
+        blob_id, key=admin_key, source_vault=base, base_path=base
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["batch_id"], f"import response missing batch_id: {body}"
+    assert body["created"] + body["staged"] == 2, (
+        f"expected 2 imported files (both .md), got {body}"
+    )
+
+
+# ----------------------------------------------------------------------------
+# Subprocess harness for the MCP-tool-level validation test.
+# ----------------------------------------------------------------------------
+#
+# The repo's top-level ``mcp/`` directory is a namespace package that
+# shadows the installed ``mcp`` SDK when imported from the repo root. The
+# Docker image works around this by running from ``cwd=mcp/``; we do the
+# same here via subprocess so the test can invoke the real tool function.
+
+
+_MCP_DIR = _REPO_ROOT / "mcp"
+
+
+def _mcp_sdk_installed() -> bool:
+    """True iff the ``mcp`` SDK is importable from ``cwd=mcp/``.
+
+    Running from inside ``mcp/`` disambiguates: the local files are then
+    the top of ``sys.path`` as individual modules (``tools``, ``client``),
+    and ``import mcp`` resolves to the site-packages SDK instead of the
+    namespace package at the repo root.
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c", "import mcp.server.fastmcp"],
+        cwd=str(_MCP_DIR),
+        capture_output=True,
+        timeout=10,
+    )
+    return probe.returncode == 0
+
+
+_MCP_SDK_SKIP = pytest.mark.skipif(
+    not _MCP_DIR.is_dir() or not _mcp_sdk_installed(),
+    reason=(
+        "`mcp[cli]` SDK not importable from the host; install "
+        "`pip install -r mcp/requirements.txt` (or run inside the mcp container) "
+        "to exercise the MCP-tool-level validation path."
+    ),
+)
+
+
+def _invoke_upload_attachment(**kwargs) -> dict:
+    """Run ``upload_attachment(**kwargs)`` via subprocess and return the dict.
+
+    Registers the tool on a throwaway ``FastMCP`` with a stub ``api`` client
+    (so validation errors return before any network call) and invokes the
+    underlying Python function. Returns the tool's return dict.
+    """
+    script = textwrap.dedent(
+        """
+        import asyncio, json, sys
+        from mcp.server.fastmcp import FastMCP
+
+        # Stub BrilliantClient — validation paths must return before any
+        # outbound call, so `post_multipart` raising is a test failure.
+        class _StubClient:
+            async def post_multipart(self, *a, **k):
+                raise AssertionError(
+                    "post_multipart reached; validation should have short-circuited"
+                )
+            async def get(self, *a, **k): pass
+            async def post(self, *a, **k): pass
+            async def put(self, *a, **k): pass
+            async def delete(self, *a, **k): pass
+
+        sys.path.insert(0, ".")
+        import tools as _tools
+
+        srv = FastMCP("t")
+        _tools.register_tools(srv, _StubClient())
+
+        kwargs = json.loads(sys.argv[1])
+
+        async def _run():
+            manager = getattr(srv, "_tool_manager", None)
+            tool = manager.get_tool("upload_attachment") if manager else None
+            fn = getattr(tool, "fn", None) if tool else None
+            if fn is None:
+                # Fallback: FastMCP exposes tools via `list_tools` coroutine.
+                registered = await srv.list_tools()
+                for t in registered:
+                    if t.name == "upload_attachment":
+                        fn = t.fn
+                        break
+            return await fn(**kwargs)
+
+        result = asyncio.run(_run())
+        print(json.dumps(result))
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script, json.dumps(kwargs)],
+        cwd=str(_MCP_DIR),
+        capture_output=True,
+        timeout=15,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"upload_attachment subprocess failed:\n"
+            f"STDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+        )
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@_MCP_SDK_SKIP
+def test_mcp_tool_rejects_invalid_base64():
+    """Invalid base64 → 400-shape dict with a detail that mentions base64."""
+    result = _invoke_upload_attachment(
+        content_base64="not-valid-base64!!!",
+        filename="vault.tgz",
+        content_type="application/gzip",
+    )
+    assert result.get("error") is True, result
+    assert result.get("status") == 400, result
+    detail = result.get("detail", "")
+    assert "base64" in detail.lower(), (
+        f"detail should mention base64: {detail!r}"
+    )
+
+
+@_MCP_SDK_SKIP
+def test_mcp_tool_rejects_both_path_and_base64():
+    """Supplying both ``path`` and ``content_base64`` → 400-shape dict."""
+    result = _invoke_upload_attachment(
+        path="/tmp/anything",
+        content_base64=base64.b64encode(b"x").decode("ascii"),
+        filename="x.bin",
+    )
+    assert result.get("error") is True, result
+    assert result.get("status") == 400, result
+    detail = result.get("detail", "")
+    assert "exactly one" in detail.lower() or "both" in detail.lower(), (
+        f"detail should explain mutual exclusion: {detail!r}"
+    )
+
+
+@_MCP_SDK_SKIP
+def test_mcp_tool_rejects_missing_filename_with_base64():
+    """``content_base64`` without ``filename`` → 400-shape dict."""
+    result = _invoke_upload_attachment(
+        content_base64=base64.b64encode(b"x").decode("ascii"),
+    )
+    assert result.get("error") is True, result
+    assert result.get("status") == 400, result
+    detail = result.get("detail", "")
+    assert "filename" in detail.lower(), (
+        f"detail should mention filename: {detail!r}"
     )

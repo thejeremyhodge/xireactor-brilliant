@@ -433,7 +433,19 @@ On remote Render deploys, the MCP process can't see the user's filesystem — it
    ```
    Keep the tarball under 25MB compressed (`MAX_VAULT_TARBALL_BYTES`) and under 200MB uncompressed (zip-bomb guard). The server rejects larger payloads with 413.
 
-2. **Upload the tarball to a blob.** Call `upload_attachment(path="/tmp/vault.tgz")`. Capture the returned `blob_id`.
+2. **Upload the tarball to a blob via inline bytes.** Remote MCP servers can't read the client's filesystem, so pass the tarball as base64 in the tool call itself:
+   ```bash
+   base64 -w 0 /tmp/vault.tgz   # one-line base64 string (macOS: base64 -i /tmp/vault.tgz)
+   ```
+   Then call:
+   ```
+   upload_attachment(
+     content_base64="<the base64 string>",
+     filename="vault.tgz",
+     content_type="application/gzip",
+   )
+   ```
+   Capture the returned `blob_id`. (Local stdio MCP users can still pass `path="/tmp/vault.tgz"` instead — but inline bytes is the canonical remote pattern.)
 
 3. **Finalize the import.** Call `import_vault_from_blob(blob_id=<blob_id>)`. Single blocking call, 10–30s for a typical 1k-file vault. Returns `{batch_id, created, staged, linked, errors}` — report the counts to the user. `.obsidian/**` and `.trash/**` are filtered out by default; pass `excludes=[...]` for additional globs.
 
@@ -625,7 +637,7 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
 | `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id`. **Local MCP only** — not registered on remote Render deploys; use `import_vault_from_blob` there. |
-| `upload_attachment` | Stream a local file to `POST /attachments`; returns `blob_id` + dedup info. Upstream half of the Co-work bulk-import flow — pair with `import_vault_from_blob` for vaults, or with the digest pipeline for single PDFs |
+| `upload_attachment` | Upload a file to `POST /attachments` and return `blob_id` + dedup info. Two modes: `path=` (local stdio MCP only — server must be able to read the file) or `content_base64=` + `filename=` (inline bytes — the only mode that works from remote Co-work). Upstream half of the Co-work bulk-import flow — pair with `import_vault_from_blob` for vaults, or with the digest pipeline for single PDFs |
 | `import_vault_from_blob` | Bulk-import a previously-uploaded vault tarball by `blob_id`; server-side tar walk, same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |

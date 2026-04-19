@@ -22,6 +22,8 @@ Two transports share this module:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import mimetypes
 import sys
 from pathlib import Path
@@ -831,32 +833,50 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
     @mcp.tool()
     async def upload_attachment(
-        path: str,
+        path: str | None = None,
         digest: bool = True,
         content_type: str | None = None,
+        content_base64: str | None = None,
+        filename: str | None = None,
     ) -> dict:
-        """Upload a local file to Brilliant and optionally digest it into a staged entry.
+        """Upload a file to Brilliant and optionally digest it into a staged entry.
 
-        Streams the file at `path` to `POST /attachments` as multipart and
-        returns the JSON response. When `digest=True` and the effective
-        content type is `application/pdf`, the server extracts text via
-        pypdf and creates a staged entry (visible via `list_staging`) that,
-        on approval, links back to the stored blob via `entry_attachments`.
+        Two mutually-exclusive transmission modes:
+
+        * **Filesystem path** — `upload_attachment(path="/tmp/vault.tgz")`.
+          Only works when the MCP server process can read the file
+          (local stdio MCP, or Docker-hosted MCP with a bind-mounted
+          volume). Remote deploys (Render) cannot see the client's
+          filesystem — use `content_base64` instead.
+        * **Inline base64 bytes** — `upload_attachment(
+          content_base64="H4sIAA...=", filename="vault.tgz",
+          content_type="application/gzip")`. The bytes travel in the
+          tool-call JSON itself, so this works from any transport
+          including remote Co-work. Pair with `filename` so the server
+          records a sensible original name.
+
+        Supply exactly one of `path` or `content_base64`. Supplying both
+        (or neither) returns a 400-shaped error dict.
 
         Parameters:
-          path          — absolute path to a local file. The MCP server
-                          process must be able to read the file directly
-                          (`open(path, 'rb')`), which for Docker-hosted
-                          MCP means the file must live on a bind-mounted
-                          volume. Relative paths are resolved against the
-                          MCP server's working directory.
-          digest        — when True and content_type resolves to
-                          `application/pdf`, the upload triggers the PDF
-                          digest pipeline. Ignored for non-PDF uploads.
-          content_type  — explicit MIME override. If None, the type is
-                          derived from the file extension via
-                          `mimetypes.guess_type`, falling back to
-                          `application/octet-stream`.
+          path            — absolute path to a local file. The MCP server
+                            process must be able to read the file
+                            directly (`open(path, 'rb')`). Mutually
+                            exclusive with `content_base64`.
+          digest          — when True and content_type resolves to
+                            `application/pdf`, the upload triggers the
+                            PDF digest pipeline. Ignored for non-PDF
+                            uploads.
+          content_type    — explicit MIME override. If None, derived
+                            from the filename extension via
+                            `mimetypes.guess_type`, falling back to
+                            `application/octet-stream`.
+          content_base64  — base64-encoded file bytes (standard
+                            alphabet, padding optional). Mutually
+                            exclusive with `path`.
+          filename        — original filename to record on the blob.
+                            Required with `content_base64`; ignored
+                            with `path` (the path basename is used).
 
         Returns the server's JSON verbatim. For successful uploads:
           {
@@ -872,29 +892,69 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         `dedup: true` with the original blob_id.
         """
         user_id = _resolve_act_as_user_id()
-        file_path = Path(path)
-        if not file_path.is_file():
+
+        if path is not None and content_base64 is not None:
             return {
                 "error": True,
                 "status": 400,
-                "detail": f"File not found or not a regular file: {path}",
+                "detail": (
+                    "upload_attachment: pass exactly one of `path` or "
+                    "`content_base64`, not both"
+                ),
             }
+        if path is None and content_base64 is None:
+            return {
+                "error": True,
+                "status": 400,
+                "detail": (
+                    "upload_attachment: must supply either `path` (local "
+                    "file) or `content_base64` + `filename` (inline bytes)"
+                ),
+            }
+
+        if content_base64 is not None:
+            if not filename:
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": (
+                        "upload_attachment: `filename` is required when "
+                        "passing `content_base64`"
+                    ),
+                }
+            try:
+                data = base64.b64decode(content_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": f"upload_attachment: invalid base64 content: {exc}",
+                }
+            upload_name = filename
+        else:
+            file_path = Path(path)
+            if not file_path.is_file():
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": f"File not found or not a regular file: {path}",
+                }
+            try:
+                data = file_path.read_bytes()
+            except OSError as exc:
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": f"Could not read {path}: {exc}",
+                }
+            upload_name = file_path.name
 
         effective_ct = content_type
         if effective_ct is None:
-            guessed, _ = mimetypes.guess_type(file_path.name)
+            guessed, _ = mimetypes.guess_type(upload_name)
             effective_ct = guessed or "application/octet-stream"
 
-        try:
-            data = file_path.read_bytes()
-        except OSError as exc:
-            return {
-                "error": True,
-                "status": 400,
-                "detail": f"Could not read {path}: {exc}",
-            }
-
-        files = {"file": (file_path.name, data, effective_ct)}
+        files = {"file": (upload_name, data, effective_ct)}
         params: dict = {"digest": "true" if digest else "false"}
         # The endpoint uses the `content_type` query param as an override
         # applied on top of the multipart part's own content-type. Pass
