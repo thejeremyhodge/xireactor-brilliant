@@ -716,6 +716,86 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         return response
 
     @mcp.tool()
+    async def import_vault_content(
+        files: list[dict],
+        preview_only: bool = False,
+        source_vault: str | None = None,
+        base_path: str | None = None,
+    ) -> dict:
+        """Import a vault from in-memory content — companion to ``import_vault``.
+
+        Use this when the caller (e.g. Claude Co-work) has already read the
+        markdown files and can hand over their contents directly, skipping
+        the filesystem walk. The server-side ``/import`` endpoint does the
+        same frontmatter parsing, wikilink extraction, collision detection,
+        and batch tracking as ``import_vault``.
+
+        Parameters:
+          files          — list of ``{"filename": "<rel/path.md>", "content": "..."}``.
+                           ``"path"`` is also accepted as an alias for
+                           ``"filename"`` since Co-work attachments commonly
+                           surface with a ``path`` key.
+          preview_only   — when True, routes to ``/import/preview`` and
+                           returns the collision report without writing.
+          source_vault   — provenance identifier stored on the import batch.
+                           Defaults to ``"cowork-upload"``.
+          base_path      — logical_path prefix applied to every file.
+                           Defaults to ``"cowork-upload"``.
+
+        Returns the server response from ``/import`` (or ``/import/preview``)
+        with ``batch_id``, counts, and error list. On client-side validation
+        errors returns ``{"error": True, "detail": "..."}`` without calling
+        the server.
+        """
+        user_id = _resolve_act_as_user_id()
+
+        if not files:
+            return {"error": True, "detail": "files list is empty."}
+
+        payloads: list[dict] = []
+        for idx, f in enumerate(files):
+            if not isinstance(f, dict):
+                return {
+                    "error": True,
+                    "detail": f"files[{idx}] is not an object.",
+                }
+            filename = f.get("filename") or f.get("path")
+            content = f.get("content")
+            if not filename or content is None:
+                return {
+                    "error": True,
+                    "detail": (
+                        f"files[{idx}] requires 'filename' (or 'path') and "
+                        "'content'."
+                    ),
+                }
+            payloads.append({"filename": str(filename), "content": str(content)})
+
+        effective_base = base_path if base_path is not None else "cowork-upload"
+        effective_source = source_vault if source_vault is not None else "cowork-upload"
+
+        if preview_only:
+            return await api.post(
+                "/import/preview",
+                json={
+                    "files": payloads,
+                    "base_path": effective_base,
+                },
+                act_as=user_id,
+            )
+
+        return await api.post(
+            "/import",
+            json={
+                "files": payloads,
+                "base_path": effective_base,
+                "source_vault": effective_source,
+                "collisions": [],
+            },
+            act_as=user_id,
+        )
+
+    @mcp.tool()
     async def rollback_import(batch_id: str) -> dict:
         """Rollback an entire import batch.
 
