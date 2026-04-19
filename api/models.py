@@ -605,3 +605,58 @@ class AttachmentResponse(BaseModel):
     role: str  # source | derived | thumbnail
     created_at: datetime
     blob: BlobResponse | None = None
+
+
+# =============================================================================
+# Tag models (spec 0041 — tag triangulation read surface)
+# =============================================================================
+
+
+class TagWithCount(BaseModel):
+    """A single tag with its usage count across published entries.
+
+    Returned by ``GET /tags`` (paginated full corpus) and embedded in
+    ``session_init.manifest.tags_top`` (capped snapshot). ``count`` is the
+    number of published entries carrying the tag, scoped by RLS to the
+    caller's org.
+    """
+
+    tag: str
+    count: int
+
+
+class TagListResponse(BaseModel):
+    """Paginated response envelope for ``GET /tags``."""
+
+    tags: list[TagWithCount]
+    total: int
+
+
+class TagCoOccurrence(BaseModel):
+    """A single co-occurring neighbor tag with overlap metrics.
+
+    Returned inside ``TagCoOccurrenceResponse.neighbors`` by
+    ``GET /tags/{tag}/co-occurring``. ``co_count`` is the number of
+    published entries that carry both the target tag ``A`` and this
+    neighbor tag ``B``. ``jaccard`` is the Jaccard similarity over the
+    entry sets: ``|A ∩ B| / |A ∪ B|``, clamped to ``[0.0, 1.0]``.
+    """
+
+    tag: str
+    co_count: int
+    jaccard: float
+
+
+class TagCoOccurrenceResponse(BaseModel):
+    """Response envelope for ``GET /tags/{tag}/co-occurring``.
+
+    ``tag`` echoes the path parameter so callers can associate the
+    response with a request when fanning out. ``neighbors`` is ranked
+    by ``co_count`` descending, ``jaccard`` descending, ``tag`` ascending
+    for stable ordering. Unknown / unused tags return
+    ``{"tag": "X", "neighbors": []}`` with status 200 — consistent with
+    ``/tags`` on empty corpora (never a 404).
+    """
+
+    tag: str
+    neighbors: list[TagCoOccurrence]

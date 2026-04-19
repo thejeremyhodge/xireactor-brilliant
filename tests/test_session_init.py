@@ -26,7 +26,9 @@ import requests
 
 BASE_URL = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010")
 ADMIN_KEY = "bkai_adm1_testkey_admin"
-TOKEN_BUDGET = 2048
+# Budget bumped from 2048 → 2560 in v0.4.1 to absorb up to 20 `tags_top`
+# rows (~300-token addition). Still well under the pre-reshape 40K blowup.
+TOKEN_BUDGET = 2560
 REQUEST_TIMEOUT = 10.0
 
 
@@ -71,6 +73,7 @@ def test_session_init_returns_manifest_envelope():
         "user",
         "categories",
         "top_paths",
+        "tags_top",
         "system_entries",
         "pending_reviews",
         "hints",
@@ -108,6 +111,33 @@ def test_session_init_categories_and_top_paths_shape():
         assert isinstance(row["count"], int)
         # Prefix is a first path segment — never contains a slash.
         assert "/" not in row["logical_path_prefix"]
+
+
+def test_session_init_tags_top_shape_and_ordering():
+    """tags_top: list of {tag: str, count: int}, len ≤ 20, ordered by
+    count desc then tag asc. Emitted even when empty (for shape stability)."""
+    r = requests.get(f"{BASE_URL}/session-init", headers=_headers(), timeout=REQUEST_TIMEOUT)
+    m = r.json()["manifest"]
+
+    assert "tags_top" in m, "tags_top must always be present (empty list when empty)"
+    tags_top = m["tags_top"]
+    assert isinstance(tags_top, list)
+    assert len(tags_top) <= 20, "tags_top must be capped at 20 rows"
+
+    for row in tags_top:
+        assert set(row.keys()) == {"tag", "count"}, (
+            f"tags_top row must be {{tag, count}}, got {row.keys()}"
+        )
+        assert isinstance(row["tag"], str)
+        assert isinstance(row["count"], int)
+        assert row["count"] > 0
+
+    # Ordering: count desc, then tag asc within a tie.
+    for prev, curr in zip(tags_top, tags_top[1:]):
+        assert (
+            prev["count"] > curr["count"]
+            or (prev["count"] == curr["count"] and prev["tag"] <= curr["tag"])
+        ), f"tags_top not sorted (count desc, tag asc): {prev} before {curr}"
 
 
 def test_session_init_system_entries_omit_content():
@@ -190,10 +220,11 @@ def test_session_init_shape_stable_for_current_kb():
     assert isinstance(m, dict)
     assert isinstance(m["total_entries"], int)
     assert m["total_entries"] >= 0
-    # If total_entries is 0, categories/top_paths/system_entries must all
-    # be empty lists — not null, not missing keys.
+    # If total_entries is 0, categories/top_paths/tags_top/system_entries
+    # must all be empty lists — not null, not missing keys.
     if m["total_entries"] == 0:
         assert m["categories"] == []
         assert m["top_paths"] == []
+        assert m["tags_top"] == []
         assert m["system_entries"] == []
         assert m["last_updated"] is None
