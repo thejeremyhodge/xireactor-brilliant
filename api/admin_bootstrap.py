@@ -155,9 +155,14 @@ async def _create_admin_and_flip_latch(
         api_key = _generate_api_key()
 
     # Service-role API key — the MCP service's outbound Authorization.
-    # Generated fresh on every bootstrap so it has no relationship to the
-    # admin's interactive key.
-    service_api_key = _generate_api_key()
+    # On Render, `generateValue: true` provisions this at deploy time and
+    # plumbs the same value to both the API and MCP services via
+    # fromService.envVarKey. If we generated a fresh key here, the hash we
+    # store wouldn't match the plaintext the MCP already holds in env, and
+    # every outbound tool call would 401. So: prefer the env-provided
+    # value, fall back to generation only for local-dev flows where the
+    # env var is unset (docker-compose without explicit service-key plumbing).
+    service_api_key = os.getenv("BRILLIANT_SERVICE_API_KEY", "").strip() or _generate_api_key()
 
     # Pre-registered OAuth client credentials — Claude Co-work pastes these
     # into its custom-connector wizard.
