@@ -19,7 +19,7 @@ class UserContext:
     role: str  # admin | editor | commenter | viewer
     department: str | None
     source: str  # web_ui | agent | api
-    key_type: str  # interactive | agent | api_integration
+    key_type: str  # interactive | agent | api_integration | service
 
 
 # Map key_type to source
@@ -27,6 +27,11 @@ _KEY_TYPE_TO_SOURCE = {
     "interactive": "web_ui",
     "agent": "agent",
     "api_integration": "api",
+    # 'service' keys always act on behalf of a user via X-Act-As-User; the
+    # effective source is therefore the target user's downstream context.
+    # The fallback mapping below only applies when the service key is used
+    # without an X-Act-As-User header (service-identity calls, rare).
+    "service": "api",
 }
 
 
@@ -49,9 +54,15 @@ async def get_current_user(request: Request) -> UserContext:
     2. Lookup api_keys by key_prefix (first 8 chars)
     3. bcrypt verify full token against key_hash
     4. Join to users table for role, department, org_id, display_name
-    5. Map key_type to source
-    6. Update last_used_at
-    7. Return UserContext
+    5. If X-Act-As-User header is present:
+         - key_type must be 'service' (else 403)
+         - load the target user row and return UserContext for *that* user
+           (RLS downstream scopes to the target user via app.user_id +
+           kb_* role); the service key owner's identity is intentionally
+           dropped so per-user RLS is enforced end-to-end.
+    6. Map key_type to source
+    7. Update last_used_at
+    8. Return UserContext
     """
     token = _extract_bearer_token(request)
 
@@ -110,6 +121,89 @@ async def get_current_user(request: Request) -> UserContext:
             (datetime.now(timezone.utc), key_id),
         )
 
+        # ------------------------------------------------------------------
+        # X-Act-As-User handling (service-role gate)
+        # ------------------------------------------------------------------
+        # A service-role key may present X-Act-As-User: <user_id> to act as
+        # a different end user — the MCP layer uses this to thread the
+        # OAuth-bound user_id into every API call so per-user RLS applies.
+        # Any non-service key presenting the header is a client-side bug
+        # or an abuse attempt; reject with 403.
+        act_as_user_id = request.headers.get("X-Act-As-User")
+        if act_as_user_id is not None:
+            act_as_user_id = act_as_user_id.strip()
+            if not act_as_user_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="X-Act-As-User header present but empty",
+                )
+
+            if key_type != "service":
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "X-Act-As-User header is only honored on service-role "
+                        "API keys"
+                    ),
+                )
+
+            # Load the target user. Must be active and in the same org as the
+            # service key's owner (belt-and-suspenders tenant isolation).
+            cur = await conn.execute(
+                """
+                SELECT id, org_id, display_name, role, department
+                FROM users
+                WHERE id = %s
+                  AND is_active = TRUE
+                """,
+                (act_as_user_id,),
+            )
+            target = await cur.fetchone()
+            if target is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="X-Act-As-User target user not found or inactive",
+                )
+
+            (
+                target_id,
+                target_org_id,
+                target_display_name,
+                target_role,
+                target_department,
+            ) = target
+
+            if str(target_org_id) != str(org_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail="X-Act-As-User target belongs to a different org",
+                )
+
+            # Stash *target* identity on request.state so middleware (e.g.
+            # request_log + RLS session setup) scopes downstream queries to
+            # the acting user, not the service key owner.
+            request.state.user_org_id = str(target_org_id)
+            request.state.user_id = str(target_id)
+
+            # source: still reflects that the call came in on a service
+            # channel but the acting identity is the target user's.
+            return UserContext(
+                id=str(target_id),
+                org_id=str(target_org_id),
+                display_name=target_display_name,
+                role=target_role,
+                department=target_department,
+                source="api",
+                # Preserve key_type='service' so downstream code can tell
+                # this request rode in on a service channel (useful for
+                # audit + debugging) without changing authorization — role
+                # is what gates access, and role is the target user's.
+                key_type="service",
+            )
+
+        # ------------------------------------------------------------------
+        # No X-Act-As-User header → normal self-auth path.
+        # ------------------------------------------------------------------
         source = _KEY_TYPE_TO_SOURCE.get(key_type, "api")
 
         # Stash on request.state so downstream middleware (e.g. request_log)

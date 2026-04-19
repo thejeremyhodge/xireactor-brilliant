@@ -20,7 +20,6 @@ the frontend simply stores the fresh key it just received.
 
 import html as _html
 import json as _json
-import os
 import secrets
 
 import bcrypt
@@ -30,6 +29,7 @@ from psycopg.rows import dict_row
 
 from database import get_pool
 from models import LoginRequest, LoginResponse, UserResponse
+from routes.setup import _mcp_url_for_display as _mcp_url_for_display
 
 router = APIRouter(tags=["auth"])
 
@@ -94,6 +94,10 @@ def _render_login_form(email: str = "", error: str | None = None) -> str:
     <input id="email" name="email" type="email" value="{safe_email}" required autofocus>
     <label for="password">Password</label>
     <input id="password" name="password" type="password" required>
+    <label style="display: flex; align-items: center; gap: 8px; font-size: 0.9rem;">
+      <input id="rotate_client_secret" name="rotate_client_secret" type="checkbox" value="on">
+      Also rotate OAuth client secret (breaks existing Claude connectors)
+    </label>
     <button type="submit">Sign in &amp; rotate key</button>
   </form>
 </body>
@@ -101,57 +105,41 @@ def _render_login_form(email: str = "", error: str | None = None) -> str:
 """
 
 
-async def _mcp_url_for_display(pool) -> str:
-    """Render the MCP connector URL for display alongside rotated credentials.
-
-    Mirrors ``api/routes/setup.py::_mcp_url_for_display``. Resolution order:
-
-    1. ``brilliant_settings.mcp_public_url`` — populated by the MCP service
-       at boot with its own ``RENDER_EXTERNAL_URL``. Authoritative on Render.
-    2. ``BRILLIANT_MCP_PUBLIC_URL`` env var — fallback when the DB column
-       is NULL (local dev or a fresh deploy before MCP's first boot). If
-       the operator provided a bare hostname we prepend ``https://``.
-    3. ``http://localhost:8011`` — last-resort local dev default.
-    """
-    try:
-        async with pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT mcp_public_url FROM brilliant_settings WHERE id = 1"
-            )
-            row = await cur.fetchone()
-        if row and row[0]:
-            return row[0]
-    except Exception:
-        # Column may not exist yet (migration 029 pending); fall through.
-        pass
-
-    raw = os.getenv("BRILLIANT_MCP_PUBLIC_URL", "").strip()
-    if not raw:
-        return "http://localhost:8011"
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-    return f"https://{raw}"
-
-
 def _render_credentials_page(
-    email: str, api_key: str, mcp_url: str, login_url: str
+    email: str,
+    api_key: str,
+    client_id: str,
+    client_secret: str,
+    mcp_url: str,
+    login_url: str,
 ) -> str:
     """Render the post-rotation credentials page.
 
-    Mirrors the shape of ``/setup/done`` from T-0214: shows the new API key
-    once, provides a copy button, and a client-side Blob download button
-    for ``brilliant-credentials.txt``. Duplication with setup is intentional
-    for now — keeping this file self-contained beats a premature shared
-    template layer.
+    Mirrors the shape of ``/setup/done`` and shows all six user-facing
+    fields (email, api_key, client_id, client_secret, mcp_url, login_url).
+    The displayed ``client_secret`` is the current DB value — if the caller
+    opted in to rotation via the ``rotate_client_secret`` checkbox, this is
+    already the new one (rotation happens in the same transaction as the
+    key rotation, before this renders). Otherwise it's the pre-existing
+    secret — safe to re-display because password-auth gated the POST.
+
+    The duplication with ``setup.py::_render_done_page`` is tolerated: the
+    two forms have different headline copy ("You're live" vs. "Your new
+    API key") and different warning text, and they're both small f-string
+    bodies. A shared template layer can come when a third caller appears.
     """
     safe_email = _html.escape(email, quote=True)
     safe_key = _html.escape(api_key, quote=True)
+    safe_client_id = _html.escape(client_id, quote=True)
+    safe_client_secret = _html.escape(client_secret, quote=True)
     safe_mcp = _html.escape(mcp_url, quote=True)
     safe_login_url = _html.escape(login_url, quote=True)
     # The JS embeds the plaintext values via JSON.stringify to avoid any
     # quoting surprises inside the Blob contents.
     js_email = _json.dumps(email)
     js_key = _json.dumps(api_key)
+    js_client_id = _json.dumps(client_id)
+    js_client_secret = _json.dumps(client_secret)
     js_mcp = _json.dumps(mcp_url)
     js_login_url = _json.dumps(login_url)
     return f"""<!doctype html>
@@ -179,10 +167,10 @@ def _render_credentials_page(
 </style>
 </head>
 <body>
-  <h1>Your new API key</h1>
+  <h1>Your credentials</h1>
   <div class="warn">
-    <strong>Save this now.</strong> It will not be shown again. Any older
-    keys you had are now invalidated.
+    <strong>Save this now.</strong> The API key was just rotated and will
+    not be shown again. Any older keys you had are now invalidated.
   </div>
 
   <div class="field">
@@ -201,6 +189,16 @@ def _render_credentials_page(
   </div>
 
   <div class="field">
+    <div class="label">OAuth client ID</div>
+    <code id="client-id-val">{safe_client_id}</code>
+  </div>
+
+  <div class="field">
+    <div class="label">OAuth client secret</div>
+    <code id="client-secret-val">{safe_client_secret}</code>
+  </div>
+
+  <div class="field">
     <div class="label">Login URL</div>
     <code id="login-val">{safe_login_url}</code>
   </div>
@@ -208,12 +206,16 @@ def _render_credentials_page(
   <div class="field">
     <button id="copy-key">Copy API key</button>
     <button id="copy-mcp" class="secondary">Copy MCP URL</button>
+    <button id="copy-client-id" class="secondary">Copy client ID</button>
+    <button id="copy-client-secret" class="secondary">Copy client secret</button>
     <button id="download" class="secondary">Download brilliant-credentials.txt</button>
   </div>
 
 <script>
   const EMAIL = {js_email};
   const API_KEY = {js_key};
+  const CLIENT_ID = {js_client_id};
+  const CLIENT_SECRET = {js_client_secret};
   const MCP_URL = {js_mcp};
   const LOGIN_URL = {js_login_url};
 
@@ -233,11 +235,17 @@ def _render_credentials_page(
     () => copyTo("copy-key", API_KEY));
   document.getElementById("copy-mcp").addEventListener("click",
     () => copyTo("copy-mcp", MCP_URL));
+  document.getElementById("copy-client-id").addEventListener("click",
+    () => copyTo("copy-client-id", CLIENT_ID));
+  document.getElementById("copy-client-secret").addEventListener("click",
+    () => copyTo("copy-client-secret", CLIENT_SECRET));
 
   document.getElementById("download").addEventListener("click", () => {{
     const body =
       "Admin email: " + EMAIL + "\\n" +
       "API key: " + API_KEY + "\\n" +
+      "client_id: " + CLIENT_ID + "\\n" +
+      "client_secret: " + CLIENT_SECRET + "\\n" +
       "MCP URL: " + MCP_URL + "\\n" +
       "Login URL: " + LOGIN_URL + "\\n";
     const blob = new Blob([body], {{ type: "text/plain" }});
@@ -273,71 +281,126 @@ class _LoginFailure(Exception):
 
 
 async def _authenticate_and_rotate(
-    email_raw: str, password: str
-) -> tuple[str, dict]:
-    """Verify credentials, rotate keys, return ``(api_key_plaintext, user_row)``.
+    email_raw: str,
+    password: str,
+    rotate_client_secret: bool = False,
+) -> tuple[str, dict, str | None, str | None]:
+    """Verify credentials, rotate keys, return credentials tuple.
 
-    Rotation: before minting the new key we revoke every prior unrevoked
-    key for the user. That is intentional — this endpoint is the panic
-    button for a suspected leak, so "sign in and every other device drops"
-    is the feature, not a bug.
+    Returns ``(api_key_plaintext, user_row, client_id, client_secret)``.
+
+    - ``api_key_plaintext`` — always the freshly-minted replacement key.
+    - ``user_row`` — dict of the authenticated user.
+    - ``client_id`` / ``client_secret`` — the workspace's pre-registered
+      OAuth client credentials. If ``rotate_client_secret=True``, the
+      secret is rotated inside the same transaction as the key rotation
+      and the NEW value is returned. Otherwise the existing stored secret
+      is returned unchanged. ``None`` on both fields if no OAuth client
+      row exists (local-dev installs that pre-date sprint 0039).
+
+    Rotation semantics: before minting the new key we revoke every prior
+    unrevoked key for the user. That is intentional — this endpoint is the
+    panic button for a suspected leak, so "sign in and every other device
+    drops" is the feature, not a bug. The client_secret rotation is opt-in
+    (default off) to avoid breaking live Claude Co-work connectors on
+    every recovery login; operators flip the checkbox when they believe
+    the secret itself has leaked.
     """
     email = email_raw.strip().lower()
 
     pool = get_pool()
     async with pool.connection() as conn:
-        cur = await conn.execute(
-            """
-            SELECT id, org_id, display_name, email, role, department,
-                   is_active, password_hash
-            FROM users
-            WHERE email = %s
-            """,
-            (email,),
-        )
-        cur.row_factory = dict_row
-        user = await cur.fetchone()
+        async with conn.transaction():
+            cur = await conn.execute(
+                """
+                SELECT id, org_id, display_name, email, role, department,
+                       is_active, password_hash
+                FROM users
+                WHERE email = %s
+                """,
+                (email,),
+            )
+            cur.row_factory = dict_row
+            user = await cur.fetchone()
 
-        if user is None:
-            raise _LoginFailure()
-        if not user["is_active"]:
-            raise _LoginFailure()
-        if not user["password_hash"]:
-            raise _LoginFailure()
-        if not bcrypt.checkpw(
-            password.encode("utf-8"),
-            user["password_hash"].encode("utf-8"),
-        ):
-            raise _LoginFailure()
+            if user is None:
+                raise _LoginFailure()
+            if not user["is_active"]:
+                raise _LoginFailure()
+            if not user["password_hash"]:
+                raise _LoginFailure()
+            if not bcrypt.checkpw(
+                password.encode("utf-8"),
+                user["password_hash"].encode("utf-8"),
+            ):
+                raise _LoginFailure()
 
-        # Rotation: revoke any currently-active keys for this user *before*
-        # we mint the replacement. This invalidates every other live
-        # session by design — it is the "something leaked" escape hatch.
-        await conn.execute(
-            "UPDATE api_keys SET is_revoked = TRUE "
-            "WHERE user_id = %s AND is_revoked = FALSE",
-            (user["id"],),
-        )
+            # Rotation: revoke any currently-active keys for this user
+            # *before* we mint the replacement. This invalidates every
+            # other live session by design — it is the "something leaked"
+            # escape hatch.
+            await conn.execute(
+                "UPDATE api_keys SET is_revoked = TRUE "
+                "WHERE user_id = %s AND is_revoked = FALSE",
+                (user["id"],),
+            )
 
-        # Mint a fresh key. Format is preserved from the original login
-        # handler so the `bkai_xxxx` 9-char prefix still matches the
-        # partial unique index on api_keys.key_prefix WHERE NOT is_revoked.
-        suffix = secrets.token_hex(12)
-        key_prefix = f"bkai_{suffix[:4]}"
-        full_key = f"{key_prefix}_{suffix[4:]}"
-        key_hash = bcrypt.hashpw(
-            full_key.encode("utf-8"), bcrypt.gensalt()
-        ).decode("utf-8")
+            # Mint a fresh key. Format is preserved from the original login
+            # handler so the `bkai_xxxx` 9-char prefix still matches the
+            # partial unique index on api_keys.key_prefix WHERE NOT
+            # is_revoked.
+            suffix = secrets.token_hex(12)
+            key_prefix = f"bkai_{suffix[:4]}"
+            full_key = f"{key_prefix}_{suffix[4:]}"
+            key_hash = bcrypt.hashpw(
+                full_key.encode("utf-8"), bcrypt.gensalt()
+            ).decode("utf-8")
 
-        await conn.execute(
-            """
-            INSERT INTO api_keys (user_id, org_id, key_hash, key_prefix, key_type, label)
-            VALUES (%s, %s, %s, %s, 'interactive', 'Login session key')
-            """,
-            (user["id"], user["org_id"], key_hash, key_prefix),
-        )
+            await conn.execute(
+                """
+                INSERT INTO api_keys (user_id, org_id, key_hash, key_prefix, key_type, label)
+                VALUES (%s, %s, %s, %s, 'interactive', 'Login session key')
+                """,
+                (user["id"], user["org_id"], key_hash, key_prefix),
+            )
 
-        return full_key, dict(user)
+            # Fetch the workspace's OAuth client row. Sprint 0039 ships a
+            # single client per workspace (spec calls it out as an
+            # explicit scope limit); select the first row by
+            # ``client_id_issued_at`` to be deterministic if that ever
+            # changes. If there's no row (legacy install pre-dating 030),
+            # we return ``None`` / ``None`` and the page renders blanks.
+            cur2 = await conn.execute(
+                """
+                SELECT client_id, client_secret
+                FROM oauth_clients
+                ORDER BY client_id_issued_at ASC
+                LIMIT 1
+                """
+            )
+            oauth_row = await cur2.fetchone()
+            client_id: str | None = None
+            client_secret: str | None = None
+            if oauth_row is not None:
+                client_id = oauth_row[0]
+                if rotate_client_secret:
+                    # Rotate in the same transaction as the api_key
+                    # rotation so the two secrets flip atomically. The
+                    # operator has already proven password ownership
+                    # above, so no additional gating needed.
+                    client_secret = secrets.token_hex(32)
+                    await conn.execute(
+                        """
+                        UPDATE oauth_clients
+                        SET client_secret = %s
+                        WHERE client_id = %s
+                        """,
+                        (client_secret, client_id),
+                    )
+                else:
+                    client_secret = oauth_row[1]
+
+            return full_key, dict(user), client_id, client_secret
 
 
 def _login_url_from_request(request: Request) -> str:
@@ -388,9 +451,17 @@ async def login(request: Request):
         form = await request.form()
         email = (form.get("email") or "").strip()
         password = form.get("password") or ""
+        # Checkbox is present on the form as ``rotate_client_secret=on``
+        # when checked, absent otherwise. Treat any truthy value as opt-in
+        # so a programmatic client posting ``rotate_client_secret=true``
+        # still works.
+        rotate_secret_raw = (form.get("rotate_client_secret") or "").strip().lower()
+        rotate_client_secret = rotate_secret_raw in ("on", "true", "1", "yes")
 
         try:
-            api_key, user = await _authenticate_and_rotate(email, password)
+            api_key, user, client_id, client_secret = await _authenticate_and_rotate(
+                email, password, rotate_client_secret=rotate_client_secret
+            )
         except _LoginFailure:
             # Re-render the form with an inline error. Keep the entered
             # email so the user doesn't have to retype it, but never echo
@@ -406,6 +477,8 @@ async def login(request: Request):
             _render_credentials_page(
                 email=user["email"] or email,
                 api_key=api_key,
+                client_id=client_id or "",
+                client_secret=client_secret or "",
                 mcp_url=mcp_url,
                 login_url=login_url,
             )
@@ -424,7 +497,13 @@ async def login(request: Request):
         raise HTTPException(status_code=422, detail="Invalid login payload")
 
     try:
-        api_key, user = await _authenticate_and_rotate(body.email, body.password)
+        # JSON callers don't (yet) expose a client_secret rotation toggle;
+        # default to the non-destructive path. The OAuth client creds
+        # returned here are ignored by the JSON response — frontend
+        # callers that need them can call a future dedicated endpoint.
+        api_key, user, _client_id, _client_secret = await _authenticate_and_rotate(
+            body.email, body.password
+        )
     except _LoginFailure:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 

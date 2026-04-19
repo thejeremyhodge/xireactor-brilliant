@@ -102,7 +102,13 @@ async def _mcp_url_for_display(pool) -> str:
        deploy before the MCP service has completed its first boot). We
        prepend ``https://`` if the operator provided a bare hostname.
     3. ``http://localhost:8011`` — last-resort local dev default.
+
+    Always returns a URL ending in ``/mcp`` — Claude Co-work's custom
+    connector wizard requires the full MCP endpoint, not the bare host.
+    Any trailing slash on the base URL is stripped before appending so we
+    don't emit a double slash like ``https://foo.com//mcp``.
     """
+    base: str | None = None
     try:
         async with pool.connection() as conn:
             cur = await conn.execute(
@@ -110,18 +116,27 @@ async def _mcp_url_for_display(pool) -> str:
             )
             row = await cur.fetchone()
         if row and row[0]:
-            return row[0]
+            base = row[0]
     except Exception:
         # Column may not exist yet (migration 029 pending); fall through
         # to the env-var path rather than 500ing the /setup/done render.
         pass
 
-    raw = os.getenv("BRILLIANT_MCP_PUBLIC_URL", "").strip()
-    if not raw:
-        return "http://localhost:8011"
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
-    return f"https://{raw}"
+    if not base:
+        raw = os.getenv("BRILLIANT_MCP_PUBLIC_URL", "").strip()
+        if not raw:
+            base = "http://localhost:8011"
+        elif raw.startswith("http://") or raw.startswith("https://"):
+            base = raw
+        else:
+            base = f"https://{raw}"
+
+    # Normalize: strip trailing slashes, then append /mcp. If the operator
+    # (or DB column) already included /mcp for some reason, don't double it.
+    base = base.rstrip("/")
+    if base.endswith("/mcp"):
+        return base
+    return f"{base}/mcp"
 
 
 # ---------------------------------------------------------------------------
@@ -225,17 +240,34 @@ def _render_setup_form(
 def _render_done_page(
     email: str,
     api_key: str,
+    client_id: str,
+    client_secret: str,
     mcp_url: str,
     login_url: str,
 ) -> str:
     """Render the post-setup credentials page.
 
-    The plaintext API key is embedded here exactly once. Client-side JS
-    offers a clipboard-copy button and a Blob-based ``.txt`` download so
-    the operator has multiple paths to save it before closing the tab.
+    Shows all six user-facing fields exactly once:
+
+    - ``email``          — admin email
+    - ``api_key``        — admin interactive API key (plaintext)
+    - ``client_id``      — OAuth client id for Claude Co-work
+    - ``client_secret``  — OAuth client secret for Claude Co-work
+    - ``mcp_url``        — MCP endpoint (already ``/mcp``-suffixed)
+    - ``login_url``      — password-recovery URL
+
+    Note the deliberate omission of ``service_api_key`` — that's an
+    MCP-internal credential consumed by the MCP service's outbound
+    Authorization header. It's read back from env or the DB by ops tooling
+    and is never part of the operator-visible ceremony.
+
+    Client-side JS offers a clipboard-copy button per secret and a
+    Blob-based ``brilliant-credentials.txt`` download listing all six.
     """
     safe_email = _html.escape(email, quote=True)
     safe_key = _html.escape(api_key, quote=True)
+    safe_client_id = _html.escape(client_id, quote=True)
+    safe_client_secret = _html.escape(client_secret, quote=True)
     safe_mcp = _html.escape(mcp_url, quote=True)
     safe_login = _html.escape(login_url, quote=True)
 
@@ -243,6 +275,8 @@ def _render_done_page(
     # inside the Blob contents.
     js_email = _json.dumps(email)
     js_key = _json.dumps(api_key)
+    js_client_id = _json.dumps(client_id)
+    js_client_secret = _json.dumps(client_secret)
     js_mcp = _json.dumps(mcp_url)
     js_login = _json.dumps(login_url)
 
@@ -259,10 +293,10 @@ def _render_done_page(
   <p class="sub">Your admin account is created. Save these credentials now.</p>
 
   <div class="warn">
-    <strong>This is the only time you'll see this key.</strong> Download
-    the <code style="display:inline;padding:1px 5px;">.txt</code> file
-    or copy it now. If you lose it, sign in with your email + password to
-    rotate.
+    <strong>This is the only time you'll see these secrets.</strong>
+    Download the <code style="display:inline;padding:1px 5px;">.txt</code>
+    file or copy them now. If you lose the API key, sign in with your
+    email + password to rotate.
   </div>
 
   <div class="field">
@@ -287,6 +321,22 @@ def _render_done_page(
   </div>
 
   <div class="field">
+    <div class="field-label">OAuth client ID</div>
+    <code id="client-id-val" data-copy>{safe_client_id}</code>
+    <div class="actions">
+      <button type="button" id="copy-client-id" class="secondary">Copy client ID</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <div class="field-label">OAuth client secret</div>
+    <code id="client-secret-val" data-copy>{safe_client_secret}</code>
+    <div class="actions">
+      <button type="button" id="copy-client-secret" class="secondary">Copy client secret</button>
+    </div>
+  </div>
+
+  <div class="field">
     <div class="field-label">Login URL (password recovery)</div>
     <code id="login-val">{safe_login}</code>
   </div>
@@ -298,6 +348,8 @@ def _render_done_page(
 <script>
   const EMAIL = {js_email};
   const API_KEY = {js_key};
+  const CLIENT_ID = {js_client_id};
+  const CLIENT_SECRET = {js_client_secret};
   const MCP_URL = {js_mcp};
   const LOGIN_URL = {js_login};
 
@@ -320,10 +372,20 @@ def _render_done_page(
     copyText(MCP_URL, ev.currentTarget);
   }});
 
+  document.getElementById("copy-client-id").addEventListener("click", (ev) => {{
+    copyText(CLIENT_ID, ev.currentTarget);
+  }});
+
+  document.getElementById("copy-client-secret").addEventListener("click", (ev) => {{
+    copyText(CLIENT_SECRET, ev.currentTarget);
+  }});
+
   document.getElementById("download").addEventListener("click", () => {{
     const body =
       "Admin email: " + EMAIL + "\\n" +
       "API key: " + API_KEY + "\\n" +
+      "client_id: " + CLIENT_ID + "\\n" +
+      "client_secret: " + CLIENT_SECRET + "\\n" +
       "MCP URL: " + MCP_URL + "\\n" +
       "Login URL: " + LOGIN_URL + "\\n";
     const blob = new Blob([body], {{ type: "text/plain" }});
@@ -440,12 +502,24 @@ async def setup_submit(
         )
 
     try:
-        api_key_plaintext, _user_id = await create_admin_via_post(
+        (
+            api_key_plaintext,
+            _service_api_key,
+            client_id,
+            client_secret,
+            _user_id,
+        ) = await create_admin_via_post(
             pool, email_clean, password, org_name=org_name_clean
         )
     except FirstRunAlreadyClaimed:
         # Another request raced us to the latch — treat as sealed.
         raise HTTPException(status_code=404, detail="Not found")
+
+    # `_service_api_key` is intentionally NOT displayed: it's an
+    # MCP-internal credential (the MCP service's outbound Bearer token for
+    # API → act-as-user calls). Ops tooling reads it from env or DB; the
+    # operator-facing ceremony only shows the four user-configurable fields
+    # plus the derived MCP + login URLs. See spec 0039.
 
     mcp_url = await _mcp_url_for_display(pool)
     login_url = _login_url_from_request(request)
@@ -454,6 +528,8 @@ async def setup_submit(
         _render_done_page(
             email=email_clean,
             api_key=api_key_plaintext,
+            client_id=client_id,
+            client_secret=client_secret,
             mcp_url=mcp_url,
             login_url=login_url,
         )
