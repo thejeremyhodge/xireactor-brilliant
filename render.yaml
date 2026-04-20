@@ -88,6 +88,29 @@ services:
           name: brilliant-mcp
           property: host
 
+      # --- OAuth user-binding handoff (sprint 0039) ---
+      # HMAC-SHA256 secret shared between the API and the MCP. The API
+      # signs `{tx_id}|{user_id}` after a successful /oauth/login POST
+      # and redirects to `{MCP}/oauth/continue?...&sig=...`; the MCP
+      # verifies the sig before minting an auth code. `generateValue: true`
+      # lets Render emit a fresh random value on first deploy and keep it
+      # stable across restarts — never sync: false so the operator can't
+      # accidentally leave it blank. The same secret is plumbed into the
+      # MCP service below via `fromService.envVarKey`.
+      - key: OAUTH_HANDOFF_SECRET
+        generateValue: true
+
+      # --- Service-role API key (sprint 0039) ---
+      # Plaintext shared secret that the MCP presents as its outbound
+      # `Authorization: Bearer`. Per-user identity is carried via
+      # `X-Act-As-User` (honored only when the presenting key is
+      # `key_type='service'` — see api/auth.py + migration 031).
+      # `generateValue: true` + fromService sharing keeps api + mcp in
+      # sync; the value is also logged by admin_bootstrap so an operator
+      # can rotate via `/auth/login` if it leaks.
+      - key: BRILLIANT_SERVICE_API_KEY
+        generateValue: true
+
       # --- Optional Tier 3 AI reviewer ---
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -137,3 +160,26 @@ services:
 
       - key: TOKEN_EXPIRY_SECONDS
         value: "3600"
+
+      # --- OAuth user-binding handoff (sprint 0039) ---
+      # Shared HMAC secret — API generates on first deploy, MCP reads
+      # back via Render's fromService.envVarKey. The MCP uses this to
+      # verify `/oauth/continue?sig=...` signatures written by the API's
+      # /oauth/login POST handler before it mints an auth code.
+      - key: OAUTH_HANDOFF_SECRET
+        fromService:
+          type: web
+          name: brilliant-api
+          envVarKey: OAUTH_HANDOFF_SECRET
+
+      # --- Service-role API key (sprint 0039) ---
+      # The MCP's outbound Authorization: Bearer when calling the API.
+      # Minted by the API service (generateValue), pulled here via
+      # fromService. `mcp/client.py` reads this env var and combines it
+      # with per-request `X-Act-As-User` headers derived from the
+      # AccessToken.user_id bound on each OAuth token.
+      - key: BRILLIANT_SERVICE_API_KEY
+        fromService:
+          type: web
+          name: brilliant-api
+          envVarKey: BRILLIANT_SERVICE_API_KEY

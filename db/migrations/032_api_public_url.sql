@@ -1,0 +1,37 @@
+-- 032_api_public_url.sql
+-- Add api_public_url to the brilliant_settings singleton so the API service
+-- can publish its Render-provided external URL back for the MCP to read.
+--
+-- Context
+-- -------
+-- render.yaml wires BRILLIANT_BASE_URL on the MCP service via
+-- fromService.property:host, which returns Render's INTERNAL service-
+-- discovery name (e.g. "brilliant-api") and NOT the public FQDN. The MCP
+-- service's new Sprint-0039 authorize() handler 302-redirects the end
+-- user's browser to `{api_public_url}/oauth/login?tx=...` — on Render, the
+-- internal name is not browser-resolvable, so the redirect lands on a dead
+-- hostname and the OAuth handoff never completes.
+--
+-- Fix
+-- ---
+-- This is a precise mirror of migration 029's MCP-side pattern. Each API
+-- boot reads its own $RENDER_EXTERNAL_URL (the authoritative full public
+-- URL Render injects on every web service) and writes it here under
+-- SET LOCAL ROLE kb_admin. The MCP's `_resolve_api_public_url` helper
+-- (mcp/remote_server.py) already reads this column as priority #1 and
+-- falls back to env vars / localhost when NULL — no MCP change needed.
+--
+-- Grants: migration 027 already grants UPDATE on brilliant_settings to
+-- kb_admin and SELECT to every kb_* role. The API writes under SET LOCAL
+-- ROLE kb_admin on startup; no extra GRANTs needed.
+--
+-- Depends on: 027_first_run_flag.sql
+-- Surfaced during: T-0228 validation of sprint 0039 — the MCP's new
+--                  `authorize()` handler needs a browser-visible API URL
+--                  to redirect the user to the login page, and
+--                  `BRILLIANT_BASE_URL` (via fromService.property:host)
+--                  resolves to the internal service name on Render.
+-- Tracked in: T-0231 (blocks wet-test T-0230).
+
+ALTER TABLE brilliant_settings
+    ADD COLUMN IF NOT EXISTS api_public_url TEXT;

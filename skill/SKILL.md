@@ -480,13 +480,45 @@ Use `create_link` only when you need a typed link (`mentions`, `supersedes`, etc
 
 ### Bulk Ingestion
 
-For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), reach for `import_vault`:
+For per-entry creates from a conversation or a single inbox file, use `create_entry` / `submit_staging` as above. For bulk imports from a coherent source (an Obsidian vault, an existing wiki export, a folder with ≥10 markdown files), pick the right bulk tool based on where you're running:
+
+#### Bulk import from Co-work (or any remote MCP)
+
+**Don't try to ship a real vault through the MCP protocol.** Claude's per-turn output cap (~32K tokens ≈ ~100KB) is smaller than a real vault archive — a typical 1k-file Obsidian vault is ~165KB compressed, ~225KB base64-encoded. The base64-over-MCP path that earlier versions of this skill described works only for toy vaults under ~50KB tarball.
+
+For real vaults, **direct the user to the browser upload page** at `https://<their-api-host>/import/vault`. The page is a first-class, always-available route that:
+
+- Accepts either `.zip` (right-click → Compress on macOS / Send to → Compressed folder on Windows) or `.tgz` / `.tar.gz` — server-side magic-byte sniff routes to the right walker
+- POSTs the archive straight to the API as multipart — bypasses the MCP protocol, the Co-work bash sandbox outbound allowlist, and the Claude per-turn output cap entirely
+- Reuses the same server-side import pipeline as `import_vault_from_blob`
+- Renders the `{created, staged, batch_id}` counts inline on success, with the rollback command for undo
+- Auto-attaches the user's API key from `localStorage` (or accepts a paste-in if missing)
+
+What to tell the user:
+
+> "For a vault this size, open `https://<your-api-host>/import/vault` in a browser, drop a `.zip` of your vault folder in (right-click → Compress), and submit. I can't stream that many bytes through this connection — Claude's per-turn output cap blocks it."
+
+The `/setup` credentials page (end of first-run) already cross-links to `/import/vault`, so first-time users are nudged into this flow naturally.
+
+#### Small-vault / local-stdio fallback
+
+For small vaults (<~50KB tarball) or local stdio MCP (Claude Code, Claude Desktop) where filesystem access works, the original three-step `upload_attachment` → `import_vault_from_blob` flow is still available:
+
+1. `tar czf /tmp/vault.tgz -C /path/to/vault .` (cap: 25MB compressed / 200MB uncompressed; server returns 413 over)
+2. `upload_attachment(path="/tmp/vault.tgz")` on local stdio, **or** `upload_attachment(content_base64="<base64>", filename="vault.tgz", content_type="application/gzip")` for inline bytes — capture `blob_id`
+3. `import_vault_from_blob(blob_id=<blob_id>)` — single blocking call, returns `{batch_id, created, staged, linked, errors}`. `.obsidian/**` and `.trash/**` excluded by default; pass `excludes=[...]` for more globs
+
+If the import looks wrong, `rollback_import(batch_id)` — same semantics as `import_vault`.
+
+#### Bulk import from a local filesystem path (local MCP only)
+
+`import_vault(path=...)` walks the directory on the MCP process's own filesystem. It is **local MCP only** — on remote Render deploys this tool is not registered; use `import_vault_from_blob` (above) instead. Claude Code and Claude Desktop over stdio see it normally.
 
 - Always run `import_vault(path=..., preview_only=True)` first — returns a collision preview (matches by title / logical_path, duplicate candidates). Present the summary to the user before committing.
 - On the real run, capture the returned `batch_id`. Report it to the user.
 - If the import looks wrong in retrospect, call `rollback_import(batch_id)` — archives the imported entries, removes created links, purges pending staging items from the batch.
 
-Rule of thumb: **< 10 files → per-entry tools; ≥ 10 files from a single source → `import_vault`.**
+Rule of thumb: **< 10 files → per-entry tools; ≥ 10 files from a single source → bulk import (`import_vault_from_blob` on remote, `import_vault` locally).**
 
 ---
 
@@ -663,7 +695,9 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `list_staging` | List/filter staging pipeline items |
 | `review_staging` | Approve or reject pending items (admin only) |
 | `process_staging` | Batch-evaluate all pending items (admin only) |
-| `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id` |
+| `import_vault` | Bulk-import a directory of markdown files by path; parses YAML frontmatter and `[[wikilinks]]`; supports `preview_only` for collision preview; returns `batch_id`. **Local MCP only** — not registered on remote Render deploys; use `import_vault_from_blob` there. |
+| `upload_attachment` | Upload a single file (PDFs, images, small docs) to `POST /attachments` and return `blob_id` + dedup info. Two modes: `path=` (local stdio MCP only — server must be able to read the file) or `content_base64=` + `filename=` (inline bytes; bounded by Claude's per-turn output cap, ~50KB practical ceiling). For attachments + small files only — **not for bulk vault imports**: real vaults exceed the per-turn output cap, so direct the user to the browser page at `/import/vault` instead |
+| `import_vault_from_blob` | Bulk-import a previously-uploaded vault archive by `blob_id`; server-side `.zip` or `.tgz` walk (magic-byte sniff), same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |
 | `list_tags` | Paginated full tag corpus with usage counts (count desc, tag asc; RLS-scoped) |

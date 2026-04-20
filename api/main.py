@@ -1,5 +1,7 @@
 """xiReactor Brilliant API — FastAPI application entrypoint."""
 
+import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,11 +12,72 @@ from database import init_pool, close_pool, get_pool
 from admin_bootstrap import ensure_admin_user
 from middleware.request_log import RequestLogMiddleware
 
+logger = logging.getLogger("brilliant.api")
+
+
+async def _publish_public_url_to_db(pool) -> None:
+    """Publish this API's public URL to ``brilliant_settings.api_public_url``.
+
+    Precise mirror of ``mcp/remote_server.py::_publish_public_url_to_db`` —
+    Render's ``fromService.property: host`` returns the internal service-
+    discovery name (e.g. ``brilliant-api``), not the public FQDN, so the
+    MCP service can't construct the API's browser-visible URL from that
+    alone. This function writes our authoritative ``RENDER_EXTERNAL_URL``
+    into a shared DB column that the MCP reads when 302-redirecting the
+    user to ``/oauth/login`` at the start of the OAuth handoff flow.
+
+    Failure-tolerant by design: a missing ``api_public_url`` column
+    (migration 032 not yet applied) or any DB hiccup must not prevent the
+    API from serving traffic. We log and continue.
+
+    Idempotent: the UPDATE re-writes the same value on every boot, and the
+    row is a singleton keyed by ``id = 1``.
+
+    Local-dev path: when ``$RENDER_EXTERNAL_URL`` is unset or empty we
+    warn-log and skip. The MCP's ``_resolve_api_public_url`` falls through
+    to ``BRILLIANT_BASE_URL`` → ``http://localhost:8010`` in that case.
+    """
+    render_external_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if not render_external_url:
+        logger.warning(
+            "RENDER_EXTERNAL_URL not set; skipping api_public_url publish "
+            "(local-dev path — MCP will fall back to BRILLIANT_BASE_URL)."
+        )
+        return
+
+    try:
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                # SET LOCAL ROLE to kb_admin so the UPDATE is authorised
+                # under the grant from migration 027. Works locally
+                # (superuser) and on Render (connection user is a member
+                # of kb_admin via migration 028). SET LOCAL scopes to
+                # this transaction only, avoiding pool-connection role
+                # poisoning (see feedback memory: feedback_set_local_role).
+                await conn.execute("SET LOCAL ROLE kb_admin")
+                await conn.execute(
+                    "UPDATE brilliant_settings "
+                    "SET api_public_url = %s, updated_at = now() "
+                    "WHERE id = 1",
+                    (render_external_url,),
+                )
+        logger.info(
+            "Published API public URL to brilliant_settings: %s",
+            render_external_url,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block API boot on this
+        logger.warning(
+            "Could not publish API public URL to brilliant_settings "
+            "(DB unreachable or migration 032 not yet applied): %s",
+            exc,
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage connection pool lifecycle and run startup bootstrap."""
     await init_pool()
+    await _publish_public_url_to_db(get_pool())
     await ensure_admin_user(get_pool())
     yield
     await close_pool()
@@ -106,6 +169,8 @@ _route_modules = [
     ("routes.analytics", "router", "/analytics"),
     # Setup ceremony — empty prefix keeps /setup at the root.
     ("routes.setup", "router", ""),
+    # OAuth tx-handoff login page (Sprint 0039). Prefix yields /oauth/login.
+    ("routes.oauth", "router", "/oauth"),
 ]
 
 for module_path, attr_name, prefix in _route_modules:

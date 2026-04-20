@@ -12,13 +12,38 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ## [Unreleased]
 
 ### Added
-- _nothing yet_
+- **`[feature][docs]` Sprint 0040b — browser vault upload (MCP-bypass onboarding path)** — first-class `/import/vault` HTML page + `POST /import/vault-upload` multipart endpoint that lets authenticated users push a vault tarball straight from their browser to the API, bypassing Claude's ~32K-token per-turn output cap, the Co-work bash sandbox outbound allowlist, and the MCP protocol entirely. Reuses the Sprint 0040 `_execute_import` + `iter_tarball_md` pipeline unchanged; renders `{created, staged, batch_id}` counts inline with the rollback command on success. Cross-linked from `/setup` so first-run flows naturally into vault seeding. SKILL.md rewritten to direct remote-MCP agents at the browser page instead of attempting base64-over-MCP for real vaults — the 0040a inline-bytes path stays as a small-vault / local-stdio fallback. README quickstart points first-time users at `https://<your-host>/import/vault`. (T-0245, T-0246, T-0247, T-0248, T-0249; spec `.xireactor/specs/0040b--2026-04-19--browser-vault-upload.md`)
 
 ### Changed
 - _nothing yet_
 
 ### Fixed
 - _nothing yet_
+
+## [0.5.0] — 2026-04-18 — OAuth user-bound authentication
+
+> **Breaking change:** Dynamic Client Registration on the MCP server is disabled. Every existing Claude Co-work connector must be re-provisioned with the `client_id` + `client_secret` shown on `/setup/done` (or recovered via `/auth/login`). Operators self-hosting before this release should treat `/setup` as a one-time reset surface after upgrading.
+
+### Added
+- Three-gate OAuth 2.1 authorization-code flow on the MCP server (gate 1: pre-registered `client_id`/`client_secret`; gate 2: user login at api-hosted `/oauth/login`; gate 3: per-user RLS via `X-Act-As-User`). Replaces the previous DCR auto-approve path where anyone with the public MCP URL could mint admin access.
+- Migration 030 — `oauth_pending_authorizations` table for the MCP↔api `/authorize` tx handoff; `user_id` columns on `oauth_access_tokens` + `oauth_auth_codes`.
+- Migration 031 — `api_keys.key_type` CHECK extended to accept `'service'`. Service keys authenticate MCP→api calls and may present `X-Act-As-User: <user_id>` to act as the authenticated user; non-service keys presenting the header → 403.
+- Migration 032 — `brilliant_settings.api_public_url`; api service publishes `$RENDER_EXTERNAL_URL` to this column at startup so the MCP can construct a browser-resolvable redirect URL for the `/oauth/login` handoff.
+- `/oauth/login` route on the api — HTML email + password form; successful submit HMAC-SHA256-signs `{tx}|{user_id}` and 302s to the MCP's `/oauth/continue`.
+- `/oauth/continue` custom route on the MCP — verifies the HMAC signature with `hmac.compare_digest`, mints an authorization code bound to the authenticated `user_id`, deletes the pending-authz row atomically.
+- OAuth client + service api_key are minted in the same transaction as the admin user during `/setup`, so a single atomic bootstrap produces: 1 user, 1 interactive key, 1 service key, 1 OAuth client. Env-driven `install.sh` bootstrap path preserved.
+- `render.yaml` now generates + shares `OAUTH_HANDOFF_SECRET` and `BRILLIANT_SERVICE_API_KEY` across the api + mcp services via `fromService.envVarKey`.
+- README "Security model" subsection under Deploy-to-Render describing the three-gate defense in depth.
+
+### Changed
+- **BREAKING:** DCR disabled. `POST /register` on the MCP returns 404. Discovery (`/.well-known/oauth-authorization-server`) still advertises `authorize` + `token` endpoints; only `registration_endpoint` is omitted, per RFC 8414.
+- `/setup/done` displays **six** fields (was four): admin email, API key, OAuth `client_id`, OAuth `client_secret`, MCP connector URL (with `/mcp` suffix — prior bug fix rolled in here), login URL. `brilliant-credentials.txt` download includes all six.
+- `/auth/login` password-login recovery page shows the same six-field layout after successful auth. New "Also rotate OAuth client secret" checkbox (default off) lets operators rotate the `client_secret` alongside the API key in a single atomic transaction; default behavior preserves the live Claude connector.
+- MCP outbound API calls now bear `BRILLIANT_SERVICE_API_KEY` + `X-Act-As-User: <user_id>`. `BRILLIANT_API_KEY` removed from `mcp/` entirely. Tool handlers with a `user_id`-missing token raise at the MCP layer rather than silently falling through to service-level access.
+- MCP URL display on `/setup/done` + `/auth/login` is idempotent against DB values with or without a `/mcp` suffix.
+
+### Fixed
+- `/setup/done` previously omitted the `/mcp` path suffix on the displayed MCP URL; copy-paste into Claude failed to connect. Fixed in `_mcp_url_for_display`.
 
 ## [0.4.1] — 2026-04-19 — Tag triangulation read-surface
 

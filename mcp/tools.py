@@ -1,35 +1,102 @@
-"""Shared Brilliant MCP tool definitions — register on any FastMCP instance."""
+"""Shared Brilliant MCP tool definitions — register on any FastMCP instance.
+
+Sprint 0039 (T-0229): every tool handler pulls the OAuth-bound ``user_id``
+off the authenticated ``AccessToken`` (a ``BrilliantAccessToken`` from
+``remote_server.py``) and passes it as ``act_as=user_id`` to every
+``api.*`` call. The API then acts-as that user while authenticating with
+the MCP's service-role key (see ``mcp/client.py``).
+
+Two transports share this module:
+
+* **Remote (Streamable HTTP / OAuth)** — ``get_access_token()`` returns a
+  ``BrilliantAccessToken`` with ``user_id`` bound via the /authorize ->
+  /oauth/login handoff. If ``user_id`` is ``None`` on a remote-transport
+  request we raise ``ToolError`` (surfaces as a tool error response; no
+  API call is made, no service-level write happens).
+* **Local stdio (Claude Desktop)** — the request has no authenticated
+  user. ``get_access_token()`` returns ``None`` and we skip the
+  ``act_as`` param. The local user's single-tenant API key is assumed
+  to be set via env for the stdio transport.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import mimetypes
 import sys
 from pathlib import Path
 
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from client import BrilliantClient
 
 # Locate the shared vault-walking helpers (`tools/vault_parse.py`). Used by
 # the `import_vault(path)` MCP tool so we don't duplicate the walker logic.
 # Search both the repo-root-relative `tools/` dir (local MCP run from the
-# repo) and the co-located `mcp/tools/` dir (if packaged alongside). If
-# neither is found, `import_vault` will raise a helpful error at call time
-# rather than breaking server startup.
+# repo) and the co-located `mcp/tools/` dir (if packaged alongside).
+#
+# The `_VAULT_PARSE_AVAILABLE` flag gates whether the `import_vault(path)`
+# tool registers at boot. On remote Render deploys the MCP Dockerfile uses
+# `dockerContext: ./mcp`, so the repo-root `tools/` dir isn't shipped —
+# the flag stays False and `import_vault` never appears in the Co-work
+# tool list (avoids exposing a filesystem-walk tool that has no access to
+# the caller's filesystem). On local stdio runs (Claude Desktop / Claude
+# Code against a repo checkout) the flag is True and the tool registers.
 _MCP_DIR = Path(__file__).resolve().parent
 _CANDIDATE_TOOL_DIRS: list[Path] = [
     _MCP_DIR.parent / "tools",  # repo-root layout
     _MCP_DIR / "tools",         # packaged-alongside fallback
 ]
+_VAULT_PARSE_AVAILABLE: bool = False
 for _tool_dir in _CANDIDATE_TOOL_DIRS:
-    if (_tool_dir / "vault_parse.py").is_file() and str(_tool_dir) not in sys.path:
-        sys.path.insert(0, str(_tool_dir))
+    if (_tool_dir / "vault_parse.py").is_file():
+        if str(_tool_dir) not in sys.path:
+            sys.path.insert(0, str(_tool_dir))
+        _VAULT_PARSE_AVAILABLE = True
         break
 
 
+def _resolve_act_as_user_id() -> str | None:
+    """Return the OAuth-bound ``user_id`` for the in-flight tool call, or None.
+
+    Behaviour matrix:
+
+    * Remote (OAuth) transport, token carries ``user_id`` → return the
+      UUID string. Tool handler passes ``act_as=<uuid>`` on every
+      outbound API call, API acts-as that user under RLS.
+    * Remote (OAuth) transport, token with ``user_id is None`` →
+      raise ``ToolError``. This is a security invariant: a bearer
+      token issued post-sprint must always have a bound user, and
+      falling through to the MCP's service identity would let any
+      valid-but-unbound token hit the API with service-level scope.
+    * Local stdio transport, no authenticated user →
+      ``get_access_token()`` returns ``None``. We return ``None`` so
+      the tool skips ``X-Act-As-User`` and the API falls back to the
+      presenting key's identity. Local stdio is single-user by
+      design, so this preserves pre-0039 behaviour.
+    """
+    access_token = get_access_token()
+    if access_token is None:
+        # Stdio / no auth context — preserved pre-0039 behaviour.
+        return None
+    # Remote path. The token should be a ``BrilliantAccessToken`` with
+    # ``user_id`` populated; ``getattr`` is defensive against any stock
+    # ``AccessToken`` sneaking through (would still raise below).
+    user_id = getattr(access_token, "user_id", None)
+    if not user_id:
+        raise ToolError(
+            "Authenticated token is missing a bound user_id. "
+            "Re-authenticate via the OAuth login flow."
+        )
+    return user_id
+
+
 def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
-    """Register all 18 Brilliant tools on the given FastMCP server instance."""
+    """Register all Brilliant tools on the given FastMCP server instance."""
 
     # -------------------------------------------------------------------
     # Read tools
@@ -69,6 +136,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Content types: context, project, meeting, decision, intelligence, daily,
         resource, department, team, system, onboarding.
         """
+        user_id = _resolve_act_as_user_id()
         params: dict = {"limit": limit, "offset": offset}
         if q:
             params["q"] = q
@@ -88,7 +156,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["tags"] = list(tags)
         if fuzzy:
             params["fuzzy"] = "true"
-        return await api.get("/entries", params=params)
+        return await api.get("/entries", params=params, act_as=user_id)
 
     @mcp.tool()
     async def get_entry(entry_id: str) -> dict:
@@ -97,7 +165,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Returns the full entry including content, metadata, tags, and version info.
         Returns 404 if the entry doesn't exist or is hidden by your permissions.
         """
-        return await api.get(f"/entries/{entry_id}")
+        user_id = _resolve_act_as_user_id()
+        return await api.get(f"/entries/{entry_id}", act_as=user_id)
 
     @mcp.tool()
     async def get_index(
@@ -132,6 +201,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         ranked results. L1 (counts only) is unconstrained; call
         ``get_index(depth=1)`` any time you just need category totals.
         """
+        user_id = _resolve_act_as_user_id()
         params: dict = {"depth": depth}
         if path is not None:
             params["path"] = path
@@ -139,7 +209,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["content_type"] = content_type
         if tag is not None:
             params["tag"] = tag
-        return await api.get("/index", params=params)
+        return await api.get("/index", params=params, act_as=user_id)
 
     @mcp.tool()
     async def get_types() -> dict:
@@ -148,7 +218,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Returns canonical types and their aliases. When creating entries,
         use canonical type names (not aliases).
         """
-        return await api.get("/types")
+        user_id = _resolve_act_as_user_id()
+        return await api.get("/types", act_as=user_id)
 
     @mcp.tool()
     async def get_neighbors(entry_id: str, depth: int = 1) -> dict:
@@ -158,7 +229,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         with cycle prevention. Bidirectional links (relates_to, contradicts) are
         traversed both ways; directional links follow outgoing direction only.
         """
-        return await api.get(f"/entries/{entry_id}/links", params={"depth": depth})
+        user_id = _resolve_act_as_user_id()
+        return await api.get(
+            f"/entries/{entry_id}/links",
+            params={"depth": depth},
+            act_as=user_id,
+        )
 
     @mcp.tool()
     async def session_init() -> dict:
@@ -193,7 +269,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Call this at the start of every conversation to load ambient context
         and check for items requiring your attention.
         """
-        return await api.get("/session-init")
+        user_id = _resolve_act_as_user_id()
+        return await api.get("/session-init", act_as=user_id)
 
     @mcp.tool()
     async def list_tags(limit: int = 500, offset: int = 0) -> dict:
@@ -217,7 +294,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Empty-corpus orgs return `{"tags": [], "total": 0}` — not an error.
         Pair with `search_entries(tag="<name>")` to drill into a specific tag.
         """
-        return await api.get("/tags", params={"limit": limit, "offset": offset})
+        user_id = _resolve_act_as_user_id()
+        return await api.get(
+            "/tags",
+            params={"limit": limit, "offset": offset},
+            act_as=user_id,
+        )
 
     @mcp.tool()
     async def get_tag_neighbors(tag: str, limit: int = 10) -> dict:
@@ -255,9 +337,11 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         `search_entries(tags=[...])` (intersect once you know what to
         pair).
         """
+        user_id = _resolve_act_as_user_id()
         return await api.get(
             f"/tags/{tag}/co-occurring",
             params={"limit": limit},
+            act_as=user_id,
         )
 
     @mcp.tool()
@@ -278,10 +362,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         ``{"suggestions": []}`` — not an error. Use this before creating
         an entry to stay consistent with the org's existing taxonomy.
         """
-        return await api.post("/tags/suggest", json={
-            "content": content,
-            "limit": limit,
-        })
+        user_id = _resolve_act_as_user_id()
+        return await api.post(
+            "/tags/suggest",
+            json={"content": content, "limit": limit},
+            act_as=user_id,
+        )
 
     # -------------------------------------------------------------------
     # Write tools
@@ -313,6 +399,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Sensitivity levels: system, strategic, operational, private, project,
         meeting, shared.
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {
             "title": title,
             "content": content,
@@ -330,7 +417,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             body["domain_meta"] = domain_meta
         if project_id is not None:
             body["project_id"] = project_id
-        return await api.post("/entries", json=body)
+        return await api.post("/entries", json=body, act_as=user_id)
 
     @mcp.tool()
     async def update_entry(
@@ -353,6 +440,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Only include fields you want to change. Automatically creates a version
         snapshot before applying changes and bumps the version number.
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {}
         for field in [
             "title", "content", "summary", "content_type",
@@ -361,7 +449,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             val = locals()[field]
             if val is not None:
                 body[field] = val
-        return await api.put(f"/entries/{entry_id}", json=body)
+        return await api.put(f"/entries/{entry_id}", json=body, act_as=user_id)
 
     @mcp.tool()
     async def delete_entry(entry_id: str) -> dict:
@@ -372,7 +460,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         The entry remains in the database but is excluded from search and index.
         """
-        return await api.delete(f"/entries/{entry_id}")
+        user_id = _resolve_act_as_user_id()
+        return await api.delete(f"/entries/{entry_id}", act_as=user_id)
 
     @mcp.tool()
     async def append_entry(
@@ -389,10 +478,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Atomically concatenates new content after a separator (default: double
         newline). Creates a version snapshot before applying.
         """
-        return await api.patch(f"/entries/{entry_id}/append", json={
-            "content": content,
-            "separator": separator,
-        })
+        user_id = _resolve_act_as_user_id()
+        return await api.patch(
+            f"/entries/{entry_id}/append",
+            json={"content": content, "separator": separator},
+            act_as=user_id,
+        )
 
     @mcp.tool()
     async def create_link(
@@ -416,6 +507,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
           part_of      — source is a component of target
           tagged_with  — source is categorized by target
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {
             "target_entry_id": target_entry_id,
             "link_type": link_type,
@@ -423,7 +515,11 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         }
         if metadata is not None:
             body["metadata"] = metadata
-        return await api.post(f"/entries/{source_entry_id}/links", json=body)
+        return await api.post(
+            f"/entries/{source_entry_id}/links",
+            json=body,
+            act_as=user_id,
+        )
 
     # -------------------------------------------------------------------
     # Governance tools
@@ -471,6 +567,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         For update/append: pass `expected_version` to enable optimistic concurrency.
         Returns 409 if the entry has been modified since you last read it.
         """
+        user_id = _resolve_act_as_user_id()
         body: dict = {
             "target_path": target_path,
             "change_type": change_type,
@@ -488,7 +585,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             body["proposed_meta"] = proposed_meta
         if expected_version is not None:
             body["expected_version"] = expected_version
-        return await api.post("/staging", json=body)
+        return await api.post("/staging", json=body, act_as=user_id)
 
     @mcp.tool()
     async def list_staging(
@@ -507,6 +604,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
           change_type — create, update, append, delete
           since — ISO datetime, returns items created on or after this time
         """
+        user_id = _resolve_act_as_user_id()
         params: dict = {"status": status}
         if target_path is not None:
             params["target_path"] = target_path
@@ -514,7 +612,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["change_type"] = change_type
         if since is not None:
             params["since"] = since
-        return await api.get("/staging", params=params)
+        return await api.get("/staging", params=params, act_as=user_id)
 
     @mcp.tool()
     async def review_staging(
@@ -531,11 +629,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Set action to 'approve' or 'reject'. On approval, the proposed change is
         applied to the knowledge base. A reason is recorded in the audit log.
         """
+        user_id = _resolve_act_as_user_id()
         endpoint = f"/staging/{staging_id}/{action}"
         body: dict = {}
         if reason is not None:
             body["reason"] = reason
-        return await api.post(endpoint, json=body if body else None)
+        return await api.post(endpoint, json=body if body else None, act_as=user_id)
 
     @mcp.tool()
     async def process_staging() -> dict:
@@ -556,7 +655,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Returns counts (approved, flagged, rejected) and per-item details
         including governance tier for each processed item.
         """
-        return await api.post("/staging/process")
+        user_id = _resolve_act_as_user_id()
+        return await api.post("/staging/process", act_as=user_id)
 
     # -------------------------------------------------------------------
     # Onboarding tools
@@ -579,19 +679,26 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         This is a single-use action — failed attempts invalidate the invite.
         """
-        return await api.post("/invitations/redeem", json={
-            "invite_code": invite_code,
-            "token": token,
-            "email": email,
-            "display_name": display_name,
-            "password": password,
-        }, api_key="")
+        # Invite redemption is unauthenticated by design — it is the flow
+        # that mints the very first key for a new user. We pass an empty
+        # api_key override (so no ``Authorization`` header is trusted) and
+        # deliberately skip ``act_as`` since there is no bound user yet.
+        return await api.post(
+            "/invitations/redeem",
+            json={
+                "invite_code": invite_code,
+                "token": token,
+                "email": email,
+                "display_name": display_name,
+                "password": password,
+            },
+            api_key="",
+        )
 
     # -------------------------------------------------------------------
     # Import tools
     # -------------------------------------------------------------------
 
-    @mcp.tool()
     async def import_vault(
         path: str,
         preview_only: bool = False,
@@ -634,6 +741,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         max_files) returns `{"error": True, "detail": "..."}` without
         touching the server.
         """
+        user_id = _resolve_act_as_user_id()
         try:
             from vault_parse import (  # type: ignore
                 build_payloads,
@@ -698,6 +806,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
                     "files": payloads,
                     "base_path": effective_base,
                 },
+                act_as=user_id,
             )
         else:
             response = await api.post(
@@ -708,6 +817,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
                     "source_vault": effective_source,
                     "collisions": [],
                 },
+                act_as=user_id,
             )
 
         # Surface client-side read errors alongside the server response so
@@ -718,6 +828,94 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         return response
 
+    # ``import_vault`` is a filesystem-walk tool — it only makes sense when
+    # the MCP process can see the caller's vault directory directly. On
+    # remote Render deploys the `tools/vault_parse.py` walker isn't shipped
+    # (the MCP Dockerfile's `dockerContext: ./mcp` excludes repo-root
+    # `tools/`), so we gate registration on the walker being importable.
+    # Remote Co-work users get only `import_vault_from_blob`; local stdio
+    # users (Claude Code / Desktop) keep `import_vault` alongside it.
+    if _VAULT_PARSE_AVAILABLE:
+        mcp.tool()(import_vault)
+
+    @mcp.tool()
+    async def import_vault_from_blob(
+        blob_id: str,
+        source_vault: str | None = None,
+        base_path: str | None = None,
+        excludes: list[str] | None = None,
+    ) -> dict:
+        """Import a vault tarball that has already been uploaded as a blob.
+
+        This is the remote-friendly bulk import path — use it from Claude
+        Co-work or any client that can't hand the MCP a local filesystem
+        path. The full flow is:
+
+            1. In bash, tar+gzip your vault:
+                   tar czf /tmp/vault.tgz -C /path/to/vault .
+               Keep the tarball under 25MB compressed (``MAX_VAULT_TARBALL_BYTES``);
+               the server rejects larger uploads with 413.
+            2. Call ``upload_attachment(path="/tmp/vault.tgz")`` and capture
+               the ``blob_id`` from the response.
+            3. Call ``import_vault_from_blob(blob_id=<blob_id>)`` — this
+               tool. The API fetches the blob under your RLS scope, streams
+               it through ``tarfile.extractfile()`` one member at a time,
+               filters for ``.md`` files (skipping ``.obsidian/**`` and
+               ``.trash/**`` by default), and runs the same frontmatter
+               parsing, wikilink extraction, and governance pipeline as
+               ``POST /import``. Typical completion: 10-30s for a ~1k-file
+               vault. Single blocking call, no polling.
+            4. Inspect ``list_staging`` to see what landed in the
+               governance queue (or the published entries if your role is
+               editor/admin).
+
+        Parameters:
+          blob_id       — UUID returned by ``upload_attachment``. Must be
+                          visible to you under RLS (same org / scope).
+          source_vault  — provenance identifier stored on the import batch.
+                          Defaults to ``"cowork-upload"``.
+          base_path     — ``logical_path`` prefix applied to every file.
+                          Defaults to ``"cowork-upload"``.
+          excludes      — additional glob patterns (relative to the vault
+                          root inside the tarball) to skip; always merged
+                          with the built-in ``.obsidian/**`` and
+                          ``.trash/**`` defaults.
+
+        Returns the server response from ``POST /import/vault-from-blob``:
+          {
+            "batch_id":   "<uuid>",
+            "created":    <int>,
+            "staged":     <int>,
+            "linked":     <int>,
+            "errors":     [...],
+            ...
+          }
+
+        Notes:
+          * On remote Render deploys this is the ONLY bulk-import path.
+            The legacy ``import_vault(path)`` filesystem-walk tool is
+            local-MCP-only (stdio transport with ``tools/vault_parse.py``
+            on the server's sys.path) and will not appear in Co-work's
+            tool list.
+          * Tarballs over 25MB compressed return 413 — split the vault
+            or raise ``MAX_VAULT_TARBALL_BYTES`` on the server.
+          * Tarballs that decompress past 200MB also return 413 (zip-bomb
+            guard).
+        """
+        user_id = _resolve_act_as_user_id()
+        body: dict = {"blob_id": blob_id}
+        if source_vault is not None:
+            body["source_vault"] = source_vault
+        if base_path is not None:
+            body["base_path"] = base_path
+        if excludes is not None:
+            body["excludes"] = excludes
+        return await api.post(
+            "/import/vault-from-blob",
+            json=body,
+            act_as=user_id,
+        )
+
     @mcp.tool()
     async def rollback_import(batch_id: str) -> dict:
         """Rollback an entire import batch.
@@ -725,10 +923,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Archives all entries created by the batch, removes links and pending
         staging items. The batch status changes to 'rolled_back'.
 
-        Use the batch_id returned from import_vault to identify which batch
-        to roll back. Cannot roll back an already rolled-back batch (returns 409).
+        Use the batch_id returned from ``import_vault`` or
+        ``import_vault_from_blob`` to identify which batch to roll back.
+        Cannot roll back an already rolled-back batch (returns 409).
         """
-        return await api.delete(f"/import/{batch_id}")
+        user_id = _resolve_act_as_user_id()
+        return await api.delete(f"/import/{batch_id}", act_as=user_id)
 
     # -------------------------------------------------------------------
     # Attachment tools
@@ -736,32 +936,50 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
     @mcp.tool()
     async def upload_attachment(
-        path: str,
+        path: str | None = None,
         digest: bool = True,
         content_type: str | None = None,
+        content_base64: str | None = None,
+        filename: str | None = None,
     ) -> dict:
-        """Upload a local file to Brilliant and optionally digest it into a staged entry.
+        """Upload a file to Brilliant and optionally digest it into a staged entry.
 
-        Streams the file at `path` to `POST /attachments` as multipart and
-        returns the JSON response. When `digest=True` and the effective
-        content type is `application/pdf`, the server extracts text via
-        pypdf and creates a staged entry (visible via `list_staging`) that,
-        on approval, links back to the stored blob via `entry_attachments`.
+        Two mutually-exclusive transmission modes:
+
+        * **Filesystem path** — `upload_attachment(path="/tmp/vault.tgz")`.
+          Only works when the MCP server process can read the file
+          (local stdio MCP, or Docker-hosted MCP with a bind-mounted
+          volume). Remote deploys (Render) cannot see the client's
+          filesystem — use `content_base64` instead.
+        * **Inline base64 bytes** — `upload_attachment(
+          content_base64="H4sIAA...=", filename="vault.tgz",
+          content_type="application/gzip")`. The bytes travel in the
+          tool-call JSON itself, so this works from any transport
+          including remote Co-work. Pair with `filename` so the server
+          records a sensible original name.
+
+        Supply exactly one of `path` or `content_base64`. Supplying both
+        (or neither) returns a 400-shaped error dict.
 
         Parameters:
-          path          — absolute path to a local file. The MCP server
-                          process must be able to read the file directly
-                          (`open(path, 'rb')`), which for Docker-hosted
-                          MCP means the file must live on a bind-mounted
-                          volume. Relative paths are resolved against the
-                          MCP server's working directory.
-          digest        — when True and content_type resolves to
-                          `application/pdf`, the upload triggers the PDF
-                          digest pipeline. Ignored for non-PDF uploads.
-          content_type  — explicit MIME override. If None, the type is
-                          derived from the file extension via
-                          `mimetypes.guess_type`, falling back to
-                          `application/octet-stream`.
+          path            — absolute path to a local file. The MCP server
+                            process must be able to read the file
+                            directly (`open(path, 'rb')`). Mutually
+                            exclusive with `content_base64`.
+          digest          — when True and content_type resolves to
+                            `application/pdf`, the upload triggers the
+                            PDF digest pipeline. Ignored for non-PDF
+                            uploads.
+          content_type    — explicit MIME override. If None, derived
+                            from the filename extension via
+                            `mimetypes.guess_type`, falling back to
+                            `application/octet-stream`.
+          content_base64  — base64-encoded file bytes (standard
+                            alphabet, padding optional). Mutually
+                            exclusive with `path`.
+          filename        — original filename to record on the blob.
+                            Required with `content_base64`; ignored
+                            with `path` (the path basename is used).
 
         Returns the server's JSON verbatim. For successful uploads:
           {
@@ -776,29 +994,70 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Uploading identical bytes twice within the same org returns
         `dedup: true` with the original blob_id.
         """
-        file_path = Path(path)
-        if not file_path.is_file():
+        user_id = _resolve_act_as_user_id()
+
+        if path is not None and content_base64 is not None:
             return {
                 "error": True,
                 "status": 400,
-                "detail": f"File not found or not a regular file: {path}",
+                "detail": (
+                    "upload_attachment: pass exactly one of `path` or "
+                    "`content_base64`, not both"
+                ),
             }
+        if path is None and content_base64 is None:
+            return {
+                "error": True,
+                "status": 400,
+                "detail": (
+                    "upload_attachment: must supply either `path` (local "
+                    "file) or `content_base64` + `filename` (inline bytes)"
+                ),
+            }
+
+        if content_base64 is not None:
+            if not filename:
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": (
+                        "upload_attachment: `filename` is required when "
+                        "passing `content_base64`"
+                    ),
+                }
+            try:
+                data = base64.b64decode(content_base64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": f"upload_attachment: invalid base64 content: {exc}",
+                }
+            upload_name = filename
+        else:
+            file_path = Path(path)
+            if not file_path.is_file():
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": f"File not found or not a regular file: {path}",
+                }
+            try:
+                data = file_path.read_bytes()
+            except OSError as exc:
+                return {
+                    "error": True,
+                    "status": 400,
+                    "detail": f"Could not read {path}: {exc}",
+                }
+            upload_name = file_path.name
 
         effective_ct = content_type
         if effective_ct is None:
-            guessed, _ = mimetypes.guess_type(file_path.name)
+            guessed, _ = mimetypes.guess_type(upload_name)
             effective_ct = guessed or "application/octet-stream"
 
-        try:
-            data = file_path.read_bytes()
-        except OSError as exc:
-            return {
-                "error": True,
-                "status": 400,
-                "detail": f"Could not read {path}: {exc}",
-            }
-
-        files = {"file": (file_path.name, data, effective_ct)}
+        files = {"file": (upload_name, data, effective_ct)}
         params: dict = {"digest": "true" if digest else "false"}
         # The endpoint uses the `content_type` query param as an override
         # applied on top of the multipart part's own content-type. Pass
@@ -806,7 +1065,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         # matches what we sent.
         params["content_type"] = effective_ct
 
-        return await api.post_multipart("/attachments", files=files, params=params)
+        return await api.post_multipart(
+            "/attachments",
+            files=files,
+            params=params,
+            act_as=user_id,
+        )
 
     # -------------------------------------------------------------------
     # Analytics tools (admin-only)
@@ -854,21 +1118,28 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         Admin-only — non-admin callers get {"error": "admin-only", ...}.
         """
+        user_id = _resolve_act_as_user_id()
         if kind == "top-entries":
             params: dict = {"since": since, "limit": limit}
             if actor_type is not None:
                 params["actor_type"] = actor_type
-            return _coerce_admin_error(await api.get("/analytics/top-entries", params=params))
+            return _coerce_admin_error(
+                await api.get("/analytics/top-entries", params=params, act_as=user_id)
+            )
 
         if kind == "top-endpoints":
             params = {"since": since, "limit": limit}
-            return _coerce_admin_error(await api.get("/analytics/top-endpoints", params=params))
+            return _coerce_admin_error(
+                await api.get("/analytics/top-endpoints", params=params, act_as=user_id)
+            )
 
         if kind == "session-depth":
             params = {"since": since}
             if actor_id is not None:
                 params["actor_id"] = actor_id
-            return _coerce_admin_error(await api.get("/analytics/session-depth", params=params))
+            return _coerce_admin_error(
+                await api.get("/analytics/session-depth", params=params, act_as=user_id)
+            )
 
         if kind == "summary":
             top_entries_params: dict = {"since": since, "limit": limit}
@@ -880,9 +1151,9 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
                 session_depth_params["actor_id"] = actor_id
 
             top_entries, top_endpoints, session_depth = await asyncio.gather(
-                api.get("/analytics/top-entries", params=top_entries_params),
-                api.get("/analytics/top-endpoints", params=top_endpoints_params),
-                api.get("/analytics/session-depth", params=session_depth_params),
+                api.get("/analytics/top-entries", params=top_entries_params, act_as=user_id),
+                api.get("/analytics/top-endpoints", params=top_endpoints_params, act_as=user_id),
+                api.get("/analytics/session-depth", params=session_depth_params, act_as=user_id),
             )
 
             # If any sub-call returned 403 (admin-only), surface the same

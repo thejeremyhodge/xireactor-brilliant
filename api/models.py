@@ -345,6 +345,22 @@ class ImportExecuteRequest(BaseModel):
     collisions: list[CollisionEntry] = []
 
 
+class VaultFromBlobRequest(BaseModel):
+    """Request body for ``POST /import/vault-from-blob``.
+
+    The tarball is already uploaded via ``POST /attachments`` and referenced
+    here by ``blob_id``. ``source_vault`` and ``base_path`` default to
+    ``"cowork-upload"`` when not supplied — matches the old
+    ``import_vault_content`` MCP tool so batch listings stay consistent for
+    Co-work-driven imports.
+    """
+
+    blob_id: str
+    source_vault: str | None = None
+    base_path: str | None = None
+    excludes: list[str] | None = None
+
+
 class ImportExecuteResponse(BaseModel):
     created: int
     staged: int
@@ -354,6 +370,11 @@ class ImportExecuteResponse(BaseModel):
     unrecognized_types: list[str] = []
     batch_id: str
     collisions_resolved: int = 0
+    # Only set by the browser-upload path (``POST /import/vault-upload``) — it
+    # persists the uploaded tarball to the blob store before running the import
+    # so operators can reproduce / roll back from the stored bytes. Other
+    # import paths leave this as ``None``.
+    blob_id: str | None = None
 
 
 class RollbackResponse(BaseModel):
