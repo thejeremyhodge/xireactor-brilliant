@@ -36,11 +36,18 @@
 
 ---
 
-> **v0.4.1 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
+> **v0.5.0 pre-release** — Shipped for public evaluation. APIs may change before v1.0.
 >
 > Context engineering infrastructure for institutional-grade teams.
 > A multi-tenant knowledge base with API-first architecture, AI agent
 > access via MCP, and tiered governance.
+
+## New in v0.5.0
+
+- **OAuth user-bound authentication** — three-gate security model on the remote MCP server. Gate 1: pre-registered `client_id`/`client_secret` (Dynamic Client Registration is **disabled**; strangers who discover the public MCP URL cannot self-register). Gate 2: user login at the api-hosted `/oauth/login` page. Gate 3: per-user RLS — the MCP authenticates with a `key_type='service'` api key and carries `X-Act-As-User: <user_id>` on every tool call; non-service keys presenting that header → 403. The access log records the acting user, not the service identity. **Breaking:** every existing Claude Co-work connector must be re-provisioned with the `client_id` + `client_secret` shown on `/setup` (or recovered via `/auth/login`). See the **Security model** subsection under Deploy-to-Render for the full defense-in-depth write-up.
+- **Browser vault upload at `/import/vault`** — first-class HTML page + `POST /import/vault-upload` multipart endpoint for bulk-importing an Obsidian (or plain-markdown) vault straight from the browser. Accepts `.tgz` / `.tar.gz` / `.zip` tarballs (magic-byte dispatch), bypasses Claude's per-turn output cap, the Co-work bash sandbox allowlist, and the MCP protocol entirely. Renders `{created, staged, batch_id}` counts inline with the rollback command on success. The `/setup` credentials page cross-links to it as an optional next step.
+- **Six-field credentials surface** — `/setup/done` and `/auth/login` recovery pages both render six fields (admin email, API key, OAuth `client_id`, OAuth `client_secret`, MCP connector URL with `/mcp` suffix, login URL) with copy buttons and a `brilliant-credentials.txt` download. Login rotates the API key; an opt-in "Also rotate OAuth client secret" checkbox rotates both atomically in one transaction.
+- **Deploy-window UX polish** — friendly HTML 404 on `GET /oauth/login`, a "warming up" banner on `/setup` while the api/mcp public URLs publish, and a CSS spinner on `/import/vault` uploads. Covers the Render container-swap window so first-run users never see raw 502 / `{"detail":"Not found"}`.
 
 ## New in v0.4.1
 
@@ -87,7 +94,7 @@ To pin a specific version or track `main`, pass `--ref`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thejeremyhodge/xireactor-brilliant/main/install.sh \
-  | bash -s -- --admin-email you@example.com --ref v0.3.0
+  | bash -s -- --admin-email you@example.com --ref v0.5.0
 ```
 
 To pick a different clone target, pass `--dir /path/to/target`.
@@ -320,13 +327,13 @@ Throughput stays flat as clients scale. Latency rises linearly (expected — sin
                                           │   PostgreSQL      │
                                           │   Row-Level       │
                                           │   Security (RLS)  │
-                                          │   25 migrations   │
+                                          │   32 migrations   │
                                           └───────────────────┘
 ```
 
 **Key components:**
 - **`api/`** — FastAPI backend with auth, entries, staging/governance, imports, links, permissions, comments, groups
-- **`db/migrations/`** — 25 SQL migrations (core schema through attachment digest + access-log analytics)
+- **`db/migrations/`** — 32 SQL migrations (core schema through OAuth user-binding + api-service public URL publish)
 - **`mcp/`** — MCP server wrapping the API for Claude Co-work (local + remote modes)
 - **`skill/`** — Claude Co-work skill definition + API reference
 - **`tools/vault_import.py`** — CLI helper for Obsidian vault import
