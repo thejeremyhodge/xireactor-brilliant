@@ -48,6 +48,8 @@ VALID_ACTIONS = {
     "group_delete",
     "group_member_add",
     "group_member_remove",
+    # imports
+    "import_rollback",
 }
 
 

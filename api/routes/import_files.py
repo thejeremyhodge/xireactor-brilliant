@@ -21,6 +21,7 @@ from services.frontmatter import (
     extract_title,
     parse_frontmatter,
 )
+from services import audit
 from services.links import sync_entry_links
 from services.storage import get_storage
 from services.vault_walker import iter_archive_md, resolve_exclude_patterns
@@ -1455,34 +1456,24 @@ async def rollback_import(
             {"batch_id": batch_id, "user_id": user.id},
         )
 
-        # Audit log (table may not exist)
-        try:
-            await conn.execute(
-                """INSERT INTO audit_log (
-                       org_id, action, target_type, target_id,
-                       details, performed_by, source
-                   ) VALUES (
-                       %(org_id)s, %(action)s, %(target_type)s, %(target_id)s,
-                       %(details)s, %(performed_by)s, %(source)s
-                   )""",
-                {
-                    "org_id": user.org_id,
-                    "action": "import_rollback",
-                    "target_type": "import_batch",
-                    "target_id": batch_id,
-                    "details": json.dumps(
-                        {
-                            "entries_archived": entries_archived,
-                            "links_removed": links_removed,
-                            "staging_removed": staging_removed,
-                        }
-                    ),
-                    "performed_by": user.id,
-                    "source": user.source,
-                },
-            )
-        except Exception:
-            pass  # audit_log table may not exist yet
+        # Audit log — wrapped in SAVEPOINT + kb_admin elevation via the
+        # shared helper so an audit failure can't poison the outer rollback
+        # transaction (which previously silently ROLLBACK'd the archive).
+        await audit.record(
+            conn,
+            actor_id=user.id,
+            actor_role=user.role,
+            source=user.source,
+            org_id=user.org_id,
+            action="import_rollback",
+            target_table="import_batches",
+            target_id=batch_id,
+            metadata={
+                "entries_archived": entries_archived,
+                "links_removed": links_removed,
+                "staging_removed": staging_removed,
+            },
+        )
 
     return RollbackResponse(
         batch_id=batch_id,
