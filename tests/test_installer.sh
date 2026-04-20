@@ -87,8 +87,27 @@ curl -fsS "${API_URL}/health" >/dev/null || {
   exit 11
 }
 
+echo "[smoke] asserting credentials file has all six keys"
+# Sprint 0043 T-0253 — brilliant-credentials.txt is now a key=value file
+# with six fields: admin_email, admin_api_key, oauth_client_id,
+# oauth_client_secret, mcp_url, login_url. Assert each key is present
+# with a non-empty value (oauth_client_secret is long hex; the grep
+# tolerates any non-empty value after the equals sign).
+for required_key in admin_email admin_api_key oauth_client_id oauth_client_secret mcp_url login_url; do
+  if ! grep -Eq "^${required_key}=.+" "$KEY_FILE"; then
+    echo "[smoke] FAIL: ${required_key} missing or empty in $KEY_FILE" >&2
+    echo "[smoke] credentials file contents:" >&2
+    cat "$KEY_FILE" >&2 || true
+    exit 14
+  fi
+done
+
 echo "[smoke] asserting /entries with the admin key is 200"
-key="$(cat "$KEY_FILE")"
+key="$(grep '^admin_api_key=' "$KEY_FILE" | head -n 1 | cut -d'=' -f2-)"
+if [ -z "$key" ]; then
+  echo "[smoke] FAIL: admin_api_key value is empty" >&2
+  exit 15
+fi
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${key}" "${API_URL}/entries")"
 if [ "$code" != "200" ]; then
   echo "[smoke] FAIL: /entries returned $code, expected 200" >&2
@@ -103,11 +122,123 @@ if [ "$mode" != "600" ]; then
   exit 13
 fi
 
-echo "[smoke] asserting key file is one line"
-lines="$(wc -l <"$KEY_FILE")"
-if [ "$lines" -ne 1 ]; then
-  echo "[smoke] FAIL: key file has $lines lines, expected 1" >&2
-  exit 14
+echo "[smoke] asserting banner's Key file path is absolute and resolvable from any CWD"
+# Extract the credentials-file path from the banner (captured in
+# $SUMMARY_FILE). The banner format is:
+#   Credentials file (contains 6 fields — keep it safe):
+#     <path> (mode 600)
+# So we match the header line, advance one line, and strip the "(mode 600)"
+# suffix + leading whitespace. Sprint 0043 T-0253 banner reshape.
+banner_key_path="$(awk '/Credentials file/ {getline; gsub(/^[[:space:]]+/, "", $0); sub(/ \(mode 600\).*$/, "", $0); print; exit}' "$SUMMARY_FILE")"
+if [ -z "$banner_key_path" ]; then
+  echo "[smoke] FAIL: could not extract Key file path from banner" >&2
+  echo "[smoke] banner contents:" >&2
+  cat "$SUMMARY_FILE" >&2 || true
+  exit 16
+fi
+case "$banner_key_path" in
+  /*) : ;;  # absolute — good
+  *)  echo "[smoke] FAIL: banner Key file path is relative ($banner_key_path)" >&2; exit 17 ;;
+esac
+# Resolve from a different CWD (as the operator would after the installer exits).
+if ! ( cd /tmp && test -r "$banner_key_path" ); then
+  echo "[smoke] FAIL: banner Key file path does not resolve from /tmp: $banner_key_path" >&2
+  exit 18
 fi
 
-echo "[smoke] PASS (${ELAPSED}s, under the 300s budget)"
+echo "[smoke] baseline scenario PASS (${ELAPSED}s, under the 300s budget)"
+
+# ─────────────────────────────────────────────────────────────────────
+# Port-conflict scenario (Sprint 0043 T-0257)
+#
+# Goal: with host port 5442 already bound, the installer must probe and
+# pick the next +10 step (5452) for the DB, write BRILLIANT_DB_PORT to
+# `.env`, and surface the chosen value in the banner / credentials file.
+#
+# Strategy:
+#   1. Tear down the baseline stack.
+#   2. Occupy 5442 with a disposable container (postgres:16-alpine is
+#      small and trivially bindable; we trap-cleanup it no matter what).
+#   3. Re-run install.sh; expect BRILLIANT_DB_PORT=5452 in `.env`.
+#   4. Assert the chosen port flows into the banner's Postgres line.
+#
+# The API/MCP ports (8010/8011) are not artificially contended in this
+# test — if a stray dev server is bound to them on a maintainer machine
+# that's fine, the probe will just shift the api/mcp ports too and the
+# banner will reflect whatever it picked.
+# ─────────────────────────────────────────────────────────────────────
+
+echo "[smoke] port-conflict scenario: occupying 5442"
+
+CONFLICT_CONTAINER="bk-pg-conflict.$$"
+CONFLICT_KEY_FILE="/tmp/brilliant-smoke-conflict-key.$$.txt"
+CONFLICT_SUMMARY_FILE="/tmp/brilliant-smoke-conflict-summary.$$.txt"
+conflict_cleanup() {
+  docker rm -f "$CONFLICT_CONTAINER" >/dev/null 2>&1 || true
+  rm -f "$CONFLICT_KEY_FILE" "$CONFLICT_SUMMARY_FILE" 2>/dev/null || true
+}
+# Add to the main trap chain by layering a nested cleanup. bash `trap`
+# replaces rather than appends, so call both explicitly on EXIT.
+trap 'conflict_cleanup; cleanup' EXIT
+
+echo "[smoke] tearing down baseline stack before conflict probe"
+docker compose down -v 2>/dev/null || true
+rm -f ./.env ./install.log ./brilliant-credentials.txt 2>/dev/null || true
+
+echo "[smoke] starting sentinel container on host port 5442"
+if ! docker run --rm -d \
+    -p 5442:5432 \
+    -e POSTGRES_PASSWORD=conflict \
+    --name "$CONFLICT_CONTAINER" \
+    postgres:16-alpine >/dev/null; then
+  echo "[smoke] FAIL: could not start sentinel postgres container on :5442" >&2
+  exit 20
+fi
+# Give Docker a moment to actually bind the port before the probe runs.
+sleep 2
+
+# Sanity-check that the port really is occupied from the probe's POV.
+if command -v lsof >/dev/null 2>&1; then
+  if ! lsof -i :5442 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "[smoke] FAIL: sentinel container did not bind 5442 (lsof view)" >&2
+    exit 21
+  fi
+fi
+
+echo "[smoke] running ./install.sh against contested :5442"
+./install.sh \
+  --admin-email smoke-conflict@example.com \
+  --force \
+  --key-out "$CONFLICT_KEY_FILE" \
+  | tee "$CONFLICT_SUMMARY_FILE"
+
+echo "[smoke] asserting .env picked BRILLIANT_DB_PORT=5452"
+if ! grep -Eq '^BRILLIANT_DB_PORT=5452$' ./.env; then
+  echo "[smoke] FAIL: expected BRILLIANT_DB_PORT=5452 in .env" >&2
+  echo "[smoke] .env port lines:" >&2
+  grep -E '^BRILLIANT_(DB|API|MCP)_PORT=' ./.env >&2 || true
+  exit 22
+fi
+
+echo "[smoke] asserting banner's Postgres line reports the chosen 5452 port"
+if ! grep -Fq 'Postgres:     localhost:5452' "$CONFLICT_SUMMARY_FILE"; then
+  echo "[smoke] FAIL: banner did not report localhost:5452" >&2
+  echo "[smoke] conflict banner:" >&2
+  cat "$CONFLICT_SUMMARY_FILE" >&2 || true
+  exit 23
+fi
+
+echo "[smoke] asserting credentials file mentions the chosen ports"
+# mcp_url / login_url should still be present with non-empty values.
+# The exact ports depend on what else is bound on the machine; we just
+# assert the six-field contract still holds under conflict conditions.
+for required_key in admin_email admin_api_key oauth_client_id oauth_client_secret mcp_url login_url; do
+  if ! grep -Eq "^${required_key}=.+" "$CONFLICT_KEY_FILE"; then
+    echo "[smoke] FAIL: ${required_key} missing in conflict credentials file" >&2
+    cat "$CONFLICT_KEY_FILE" >&2 || true
+    exit 24
+  fi
+done
+
+echo "[smoke] port-conflict scenario PASS"
+echo "[smoke] PASS (all scenarios)"

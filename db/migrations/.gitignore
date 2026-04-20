@@ -1,0 +1,20 @@
+# Only numbered schema migrations belong in this directory. They are
+# bind-mounted read-only into the Postgres container at
+# /docker-entrypoint-initdb.d and run automatically on first-boot of
+# an empty pgdata volume.
+#
+# Stray demo/seed SQL files (e.g. a copied db/seed/demo.sql, or a
+# revived 005_seed.sql) would be auto-applied by Postgres's init-scripts
+# hook and re-seed a clean install — so we refuse to commit them.
+# Demo data is opt-in via `install.sh --seed-demo`, which applies
+# db/seed/demo.sql through `docker exec` post-init — never through
+# this mount.
+#
+# Block demo/seed artifacts by filename pattern. Legitimate migration
+# 020_strip_frontmatter_seed.sql is pre-committed and unaffected by
+# these rules (gitignore only prevents NEW additions; tracked files stay).
+demo.sql
+demo*.sql
+**/demo.sql
+seed.sql
+999_demo_seed.sql

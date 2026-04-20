@@ -59,12 +59,18 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 INITDB_SNAPSHOT_MAX_NUMBER = 26
 
 # Migrations that exist for local demo/dogfood only and must NOT run on a
-# production Render deploy. Reasons per file:
+# production Render deploy. Retained for historical Render DBs where
+# 005_seed.sql was previously skipped and recorded in schema_migrations:
+# the file has since moved to db/seed/demo.sql (opt-in via
+# `install.sh --seed-demo`) but we keep the name in SKIP_ON_RENDER so a
+# future cross-reference to the schema_migrations row still resolves.
+# Render v0.5.1+ installs will simply never see the file in MIGRATIONS_DIR.
+#
+# Historical reason (still true for any DB pre-v0.5.1):
 #   - 005_seed.sql — inserts demo users with publicly-known plaintext API
 #     keys and demo entries. Would be a security hole on a real deploy,
 #     and also fails under FORCE ROW LEVEL SECURITY because Render's
-#     auto-generated DB user is not a superuser. The /setup admin claim
-#     ceremony creates the real admin; production starts empty.
+#     auto-generated DB user is not a superuser.
 # Listed files are still recorded in schema_migrations so the tool treats
 # them as "applied" and doesn't retry them every deploy.
 SKIP_ON_RENDER = {"005_seed.sql"}

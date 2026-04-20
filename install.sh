@@ -10,14 +10,24 @@ set -euo pipefail
 # Constants are consumed across phases; shellcheck can't see forward into
 # function bodies that arrive in later tasks (T-0176/T-0177). Suppress the
 # false-positive unused warnings at the declaration site.
-readonly SCRIPT_VERSION="0.4.0"
+readonly SCRIPT_VERSION="0.5.1"
 readonly DEFAULT_CLONE_DIR="./xireactor-brilliant"
 readonly REPO_SLUG="thejeremyhodge/xireactor-brilliant"
-readonly API_URL="http://localhost:8010"
-# shellcheck disable=SC2034
-readonly MCP_URL="http://localhost:8011"
-# shellcheck disable=SC2034
-readonly PG_HOST_PORT="5442"
+# Default host ports — overridden by phase_port_probe if occupied. These
+# are the ports advertised in README/docs; single-install flows on a clean
+# machine preserve them verbatim. Sprint 0043 T-0257.
+readonly DEFAULT_DB_PORT=5442
+readonly DEFAULT_API_PORT=8010
+readonly DEFAULT_MCP_PORT=8011
+# Chosen ports (populated by phase_port_probe). Kept as non-readonly so
+# the probe can mutate them in place. URLs below are derived from these.
+DB_HOST_PORT="${DEFAULT_DB_PORT}"
+API_HOST_PORT="${DEFAULT_API_PORT}"
+MCP_HOST_PORT="${DEFAULT_MCP_PORT}"
+# URLs re-derived after phase_port_probe. (Legacy PG_HOST_PORT alias
+# was removed in T-0257 — every call site now reads DB_HOST_PORT.)
+API_URL="http://localhost:${API_HOST_PORT}"
+MCP_URL="http://localhost:${MCP_HOST_PORT}"
 readonly LOG_FILE="./install.log"
 readonly DEFAULT_KEY_OUT="./brilliant-credentials.txt"
 readonly HEALTH_TIMEOUT_SECONDS=60
@@ -25,6 +35,10 @@ readonly HEALTH_TIMEOUT_SECONDS=60
 readonly VERIFY_TIMEOUT_SECONDS=30
 # shellcheck disable=SC2034
 readonly POLL_INTERVAL_SECONDS=2
+# Port-probe tuning: step size and maximum number of attempts per port.
+# 5 attempts at +10 each → 5442→5452→5462→5472→5482, then error out.
+readonly PORT_PROBE_STEP=10
+readonly PORT_PROBE_MAX_TRIES=5
 
 # ---------- flag defaults ----------
 
@@ -38,6 +52,7 @@ FORCE=0
 NO_INSTALL_DOCKER=0
 DRY_RUN=0
 MIGRATE_FROM_CORTEX=0
+SEED_DEMO=0
 REF=""
 REF_EXPLICIT=0
 CLONE_DIR="${DEFAULT_CLONE_DIR}"
@@ -83,6 +98,100 @@ rand_password() {
   openssl rand -base64 "$1" | tr -d '=+/' | cut -c1-"$1"
 }
 
+# ---------- port probing (Sprint 0043 T-0257) ----------
+
+port_in_use() {
+  # Returns 0 (true) if TCP port $1 on localhost is occupied, 1 otherwise.
+  # Primary: `lsof -i :$port` (standard on Mac + most Linux distros).
+  # Fallback: `nc -z localhost $port` (BusyBox / slim containers).
+  # Both are silent on success/failure; we only care about the exit code.
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -i ":${port}" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    nc -z localhost "${port}" >/dev/null 2>&1
+    return $?
+  fi
+  # No probe tool available — assume the port is free. Better to try the
+  # bind than to spuriously fail before docker compose ever runs.
+  return 1
+}
+
+probe_port() {
+  # Given a "friendly name" $1 and a starting port $2, return the first
+  # free port in the sequence start, start+10, start+20, ... up to
+  # PORT_PROBE_MAX_TRIES attempts. Prints the chosen port to stdout.
+  # Fails (exit non-zero) if every candidate in range is occupied.
+  local label="$1"
+  local start="$2"
+  local attempt=0
+  local port="$start"
+  while [ "$attempt" -lt "$PORT_PROBE_MAX_TRIES" ]; do
+    if ! port_in_use "$port"; then
+      printf '%d' "$port"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    port=$((start + attempt * PORT_PROBE_STEP))
+  done
+  die 86 "port-probe: all ${PORT_PROBE_MAX_TRIES} candidate ${label} ports occupied starting at ${start} (step ${PORT_PROBE_STEP}). Free a port or re-run after closing the conflicting service."
+}
+
+phase_port_probe() {
+  # Pick host ports for db/api/mcp — default values unless occupied. On a
+  # clean machine with nothing else bound, this is a no-op (each probe
+  # returns the default immediately) so single-install flows stay
+  # byte-identical to pre-0043 behavior.
+  log "phase 4b" "probing host ports (db=${DEFAULT_DB_PORT}, api=${DEFAULT_API_PORT}, mcp=${DEFAULT_MCP_PORT})"
+  DB_HOST_PORT="$(probe_port db "$DEFAULT_DB_PORT")"
+  API_HOST_PORT="$(probe_port api "$DEFAULT_API_PORT")"
+  MCP_HOST_PORT="$(probe_port mcp "$DEFAULT_MCP_PORT")"
+
+  # Re-derive downstream URLs so everything (health poll, verify,
+  # banner, credentials file) reads the chosen values.
+  API_URL="http://localhost:${API_HOST_PORT}"
+  MCP_URL="http://localhost:${MCP_HOST_PORT}"
+
+  if [ "$DB_HOST_PORT" != "$DEFAULT_DB_PORT" ] \
+      || [ "$API_HOST_PORT" != "$DEFAULT_API_PORT" ] \
+      || [ "$MCP_HOST_PORT" != "$DEFAULT_MCP_PORT" ]; then
+    log "phase 4b" "port conflict resolved: db=${DB_HOST_PORT}, api=${API_HOST_PORT}, mcp=${MCP_HOST_PORT}"
+  else
+    log "phase 4b" "all default ports free"
+  fi
+}
+
+# ---------- path helpers ----------
+
+absolutize_path() {
+  # Convert a (potentially relative) path to an absolute path anchored at
+  # the current working directory. Does NOT require the path to exist yet
+  # — we may be resolving $KEY_OUT before it has been written. We resolve
+  # the parent directory (which does exist, since write_key_out checks for
+  # it) and append the basename. Works on Mac + Linux without realpath.
+  # $1 path
+  local path="$1"
+  case "$path" in
+    /*) printf '%s' "$path" ;;  # already absolute
+    *)
+      local dir base
+      dir="$(dirname "$path")"
+      base="$(basename "$path")"
+      # cd into the dir in a subshell so we don't pollute the caller's cwd.
+      if [ -d "$dir" ]; then
+        printf '%s/%s' "$(cd "$dir" && pwd)" "$base"
+      else
+        # Parent doesn't exist (yet). Fall back to $PWD join — caller
+        # will later fail the dir-check in write_key_out with a clear
+        # error, which is the right behavior.
+        printf '%s/%s' "$(pwd)" "$path"
+      fi
+      ;;
+  esac
+}
+
 # ---------- help ----------
 
 print_help() {
@@ -109,6 +218,12 @@ Optional:
                              rename the cortex DB to brilliant, tear down old
                              containers, and bring up the renamed stack with
                              the existing data volume preserved.
+  --seed-demo                Opt in to the demo dataset (4 demo users, 12
+                             entries, links/versions/staging/audit rows).
+                             Applied via `docker exec` after the stack is
+                             healthy. Every seeded entry carries the
+                             `demo:seed` tag; remove later with
+                             `python tools/remove_demo_data.py --yes`.
   --ref REF                  Git ref (tag, branch, or sha) to clone when the
                              installer is not already inside a brilliant repo.
                              Default: latest release tag, or `main` if the
@@ -147,6 +262,7 @@ parse_flags() {
       --no-install-docker)   NO_INSTALL_DOCKER=1; shift ;;
       --dry-run)             DRY_RUN=1; shift ;;
       --migrate-from-cortex) MIGRATE_FROM_CORTEX=1; shift ;;
+      --seed-demo)           SEED_DEMO=1; shift ;;
       --ref)                 REF="${2:-}"; REF_EXPLICIT=1; shift 2 ;;
       --ref=*)               REF="${1#*=}"; REF_EXPLICIT=1; shift ;;
       --dir)                 CLONE_DIR="${2:-}"; shift 2 ;;
@@ -380,6 +496,19 @@ phase_env() {
     set_env_var ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" "./.env"
   fi
 
+  # Sprint 0043 T-0257 — thread chosen host ports + derived URLs into
+  # `.env`. docker-compose.yml reads BRILLIANT_{DB,API,MCP}_PORT via
+  # ${…:-default} so a clean install (no conflict) preserves the
+  # historical 5442/8010/8011 binding exactly. MCP_BASE_URL +
+  # API_BASE_URL are also written so admin_bootstrap's credential-block
+  # emitter picks up the chosen URLs (it reads these env vars and falls
+  # back to localhost:8010/8011 otherwise — see api/admin_bootstrap.py).
+  set_env_var BRILLIANT_DB_PORT  "$DB_HOST_PORT"  "./.env"
+  set_env_var BRILLIANT_API_PORT "$API_HOST_PORT" "./.env"
+  set_env_var BRILLIANT_MCP_PORT "$MCP_HOST_PORT" "./.env"
+  set_env_var MCP_BASE_URL       "$MCP_URL"       "./.env"
+  set_env_var API_BASE_URL       "$API_URL"       "./.env"
+
   chmod 600 "./.env"
   log "phase 5" ".env generated at ./.env (mode 600)"
 }
@@ -425,45 +554,156 @@ phase_verify() {
   die 4 "Admin API key did not authenticate within ${VERIFY_TIMEOUT_SECONDS}s. See ${LOG_FILE}."
 }
 
+extract_credentials_block() {
+  # Scrape the machine-parseable credential block emitted by
+  # api/admin_bootstrap.py between ===BRILLIANT_CREDENTIALS_BEGIN=== and
+  # ===BRILLIANT_CREDENTIALS_END=== markers from the api container logs.
+  # Prints the inner block (six `key=value` lines) to stdout on success,
+  # or nothing on failure.
+  #
+  # Note: admin bootstrap runs exactly once at first boot, so the block
+  # will be present in the full container log history. We use `--no-color`
+  # to avoid ANSI escape noise when future loggers add color.
+  docker compose logs --no-color api 2>/dev/null \
+    | awk '
+        /===BRILLIANT_CREDENTIALS_BEGIN===/ { inblk=1; next }
+        /===BRILLIANT_CREDENTIALS_END===/   { inblk=0 }
+        inblk {
+          # docker-compose log lines look like:
+          #   brilliant-api  | admin_email=foo@bar.com
+          # Strip the "containername ... | " prefix (the pipe is
+          # reliable). Fall back to the whole line if no pipe is found
+          # (older compose formats or custom formatters).
+          pipe = index($0, "|")
+          if (pipe > 0) {
+            line = substr($0, pipe + 1)
+            sub(/^[[:space:]]+/, "", line)
+          } else {
+            line = $0
+          }
+          if (line ~ /^[a-z_]+=/) print line
+        }
+      ' \
+    | tail -n 6
+}
+
 write_key_out() {
+  # Write the six-field credential block to $1 (mode 600). Fields are
+  # extracted from `docker compose logs api` via extract_credentials_block;
+  # when the scrape fails (e.g. logs rolled, DRY_RUN, or bootstrap hit the
+  # latch on a re-run), fall back to the in-memory ADMIN_API_KEY + email so
+  # the install still produces a credentials file — just a thinner one.
   local path="$1"
   local dir
   dir="$(dirname "$path")"
   if [ ! -d "$dir" ]; then
     die 75 "key-out directory does not exist: $dir"
   fi
-  printf '%s\n' "$ADMIN_API_KEY" >"$path"
+
+  local block
+  block="$(extract_credentials_block || true)"
+  # Count non-empty key=value lines.
+  local line_count=0
+  if [ -n "$block" ]; then
+    line_count="$(printf '%s\n' "$block" | grep -c '=')"
+  fi
+
+  {
+    if [ "$line_count" -ge 6 ]; then
+      printf '%s\n' "$block"
+    else
+      # Fallback path — bootstrap block not found (log rolled, already
+      # bootstrapped, etc). Emit what we have; downstream tooling can
+      # still read admin_email + admin_api_key.
+      printf 'admin_email=%s\n'     "$ADMIN_EMAIL"
+      printf 'admin_api_key=%s\n'   "$ADMIN_API_KEY"
+      printf 'oauth_client_id=%s\n'     ""
+      printf 'oauth_client_secret=%s\n' ""
+      printf 'mcp_url=%s\n'         "${MCP_URL}"
+      printf 'login_url=%s\n'       "${API_URL}/auth/login"
+    fi
+  } >"$path"
   chmod 600 "$path"
 }
 
 phase_summary() {
-  log "phase 8" "writing admin key to ${KEY_OUT}"
+  log "phase 8" "writing credentials to ${KEY_OUT}"
   write_key_out "$KEY_OUT"
 
-  # The banner prints to stdout only (not the log) — this is what Jeremy reads
-  # at the end of a successful run.
+  # The banner prints to stdout only (not the log) — this is what the
+  # operator reads at the end of a successful run. Sprint 0043 #42 reshape:
+  # lead with /setup + /import/vault (the URLs that actually matter to a
+  # first-run user), show the absolute Key file path so it resolves after
+  # the installer exits from any CWD, and document the stop / full-reset
+  # off-ramps so there's no "how do I turn this off?" guesswork.
   cat <<BANNER
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   xiReactor Brilliant installed successfully
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  API:           ${API_URL}
-  Health:        ${API_URL}/health
-  MCP:           ${MCP_URL}
-  Postgres:      localhost:${PG_HOST_PORT}
+  Next steps — open these in a browser:
+    Setup:        ${API_URL}/setup
+    Import vault: ${API_URL}/import/vault
 
-  Admin email:   ${ADMIN_EMAIL}
-  Admin key:     ${ADMIN_API_KEY}
-  Key file:      ${KEY_OUT} (mode 600)
+  Credentials file (contains 6 fields — keep it safe):
+    ${KEY_OUT} (mode 600)
 
-  Next steps:
-    curl -H "Authorization: Bearer \$(cat ${KEY_OUT})" ${API_URL}/entries
-    See README.md → "Connect Claude" to wire up the MCP.
+  Services:
+    API:          ${API_URL}
+    Health:       ${API_URL}/health
+    MCP:          ${MCP_URL}
+    Postgres:     localhost:${DB_HOST_PORT}
+    Admin email:  ${ADMIN_EMAIL}
+
+  Stop / reset:
+    docker compose down           # stop containers (preserves data)
+    docker compose down -v        # full reset (drops Postgres volume)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 BANNER
+}
+
+# ---------- demo seed (opt-in via --seed-demo) ----------
+
+phase_seed() {
+  # Apply db/seed/demo.sql via `docker exec` into brilliant-db. This runs
+  # AFTER phase_up (stack healthy) and AFTER phase_verify (admin user is
+  # bootstrapped) so the seed's ON CONFLICT DO NOTHING on org_demo just
+  # accepts the operator-chosen org name instead of overwriting it.
+  #
+  # We deliberately do NOT route seed SQL through the Postgres init-scripts
+  # bind-mount (db/migrations/ → /docker-entrypoint-initdb.d) — see
+  # docker-compose.yml comment on that mount. Keeping the seed out of the
+  # init path means a clean `docker compose up -d` NEVER re-seeds, and
+  # stray files can't auto-run.
+  if [ "$SEED_DEMO" -eq 0 ]; then
+    log "phase 6b" "demo seed disabled (no --seed-demo) — skipping"
+    return 0
+  fi
+
+  log "phase 6b" "applying demo seed (--seed-demo) via docker exec"
+
+  local seed_path="./db/seed/demo.sql"
+  if [ ! -f "$seed_path" ]; then
+    die 84 "demo seed file not found at ${seed_path} — is this the brilliant repo?"
+  fi
+
+  # Pipe the SQL into the running brilliant-db container. We do NOT cd into
+  # the container or bind-mount the file — `docker exec -i` + STDIN redirect
+  # is portable and does not need any compose-file changes.
+  local pg_user pg_db
+  pg_user="${POSTGRES_USER:-postgres}"
+  pg_db="${POSTGRES_DB:-brilliant}"
+
+  if ! docker exec -i brilliant-db psql -U "$pg_user" -d "$pg_db" \
+        -v ON_ERROR_STOP=1 < "$seed_path" 2>&1 | tee -a "$LOG_FILE"; then
+    log "phase 6b" "demo seed psql failed — dumping db logs"
+    docker compose logs db --tail 30 2>&1 | tee -a "$LOG_FILE" || true
+    die 85 "demo seed failed to apply. See ${LOG_FILE}. Stack is healthy; remove demo rows (if any applied) with: python tools/remove_demo_data.py --yes"
+  fi
+  log "phase 6b" "demo seed applied (12 entries tagged 'demo:seed')"
 }
 
 # ---------- migration: cortex → brilliant ----------
@@ -618,6 +858,7 @@ Resolved configuration:
   key-out:            ${KEY_OUT}
   force:              ${FORCE}
   no-install-docker:  ${NO_INSTALL_DOCKER}
+  seed-demo:          ${SEED_DEMO}
   ref:                ${REF:-(latest release tag; fallback main)}
   dir:                ${CLONE_DIR}
 
@@ -627,8 +868,10 @@ Planned phases:
   [phase 2]  docker      — detect; install Colima (Mac) or get.docker.com (Linux) if missing
   [phase 3]  repo        — confirm we're inside the brilliant repo (docker-compose.yml present)
   [phase 4]  randoms     — fill unset secrets via openssl rand
+  [phase 4b] port-probe  — probe db/api/mcp host ports; shift by ${PORT_PROBE_STEP} up to ${PORT_PROBE_MAX_TRIES} tries on conflict
   [phase 5]  env         — write ./.env from .env.sample (mode 600); refuse overwrite without --force
   [phase 6]  up          — docker compose up -d, poll ${API_URL}/health for up to ${HEALTH_TIMEOUT_SECONDS}s
+  [phase 6b] seed        — if --seed-demo: pipe db/seed/demo.sql through docker exec psql (skipped otherwise)
   [phase 7]  verify      — GET ${API_URL}/entries with admin key to confirm bootstrap
   [phase 8]  summary     — print banner, write key to ${KEY_OUT} (mode 600)
 
@@ -639,6 +882,15 @@ PLAN
 
 main() {
   parse_flags "$@"
+
+  # Resolve KEY_OUT to an absolute path BEFORE any `cd` into the self-
+  # cloned repo. This is load-bearing for two reasons:
+  #   1. The final banner prints $KEY_OUT and the operator often `cat`s it
+  #      from a different working directory — a relative path would break.
+  #   2. phase_self_clone cd's into $CLONE_DIR; a relative KEY_OUT would
+  #      silently end up inside the clone dir rather than beside the
+  #      installer invocation.
+  KEY_OUT="$(absolutize_path "$KEY_OUT")"
 
   # --migrate-from-cortex is a dedicated upgrade path and does not require
   # --admin-email — the admin user already exists in the preserved DB.
@@ -683,9 +935,11 @@ main() {
   phase_docker
   phase_repo
   phase_randoms
+  phase_port_probe
   phase_env
   phase_up
   phase_verify
+  phase_seed
   phase_summary
 }
 
