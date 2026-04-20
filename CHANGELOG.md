@@ -45,6 +45,20 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 - `/setup/done` previously omitted the `/mcp` path suffix on the displayed MCP URL; copy-paste into Claude failed to connect. Fixed in `_mcp_url_for_display`.
 
+## [0.4.1] — 2026-04-19 — Tag triangulation read-surface
+
+### Added
+- `manifest.tags_top` in `session_init` — up to 20 tags by published-entry count, ordered count desc then tag asc; gives agents the tag shape of the KB at session start without fetching entries. Empty-KB returns an empty list.
+- `GET /tags` + MCP `list_tags(limit=500, offset=0)` — paginated full tag corpus with usage counts, `{tags: [{tag, count}], total}`. Default limit 500, max 5000. RLS-scoped.
+- Multi-tag AND filtering on `search_entries` — `GET /entries?tags=a&tags=b` returns only entries containing ALL listed tags (GIN-backed `tags @> ARRAY[...]::text[]`). The MCP tool accepts `tags: list[str]`. Singular `?tag=X` is untouched; supplying both simultaneously returns 422.
+- `GET /tags/{tag}/co-occurring` + MCP `get_tag_neighbors(tag, limit=10)` — tags frequently seen on the same entries as the target, ranked by co-count then Jaccard similarity (`co_count / (A_total + B_total - co_count)`). Unknown tag returns 200 with empty neighbors.
+- Response models: `TagWithCount`, `TagListResponse`, `TagCoOccurrence`, `TagCoOccurrenceResponse`.
+
+### Changed
+- **Soft-breaking:** `get_index` applies a scale guard at `depth >= 2`. If the caller's visible published-entry count exceeds 200 AND no narrowing filter (`path`, `content_type`, or new `tag=`) is supplied, the endpoint returns **422** with body `{"error": "index_too_large", "total": N, "hint": "narrow with path=, content_type=, tag=, or use search_entries"}`. L1 (`depth=1`, counts only) remains unconstrained — always safe. Existing callers that browse large KBs at `depth >= 2` without a filter must now narrow, but the 422 body carries a hint string pointing to the recovery options.
+- `get_index` accepts a new `tag: str | None` query parameter (single tag); multi-tag AND callers should use `search_entries(tags=[...])`.
+- `skill/knowledge-base.zip` re-zipped — SKILL.md now carries a dedicated "Triangulation (tag-driven narrowing)" workflow section and a "Narrowing at scale" subsection that documents the 422 guard.
+
 ## [0.4.0] — 2026-04-18 — Tag triangulation + vault import
 
 ### Added

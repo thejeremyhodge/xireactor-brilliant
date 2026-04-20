@@ -359,7 +359,66 @@ When you need a broader view than search provides:
 get_index(depth=4)                                    # Summaries of everything
 get_index(depth=3, path="Projects/")                  # Project structure
 get_index(depth=3, content_type="decision")           # All decisions with links
+get_index(depth=3, tag="client-thryv")                # Everything tagged client-thryv
 ```
+
+### Triangulation (tag-driven narrowing)
+
+Tags are the highest-signal, lowest-cost narrowing axis at session start. The
+manifest's `tags_top` field (up to 20 tags by entry count) gives you the
+shape of the corpus before you fetch a single entry. Use this flow whenever
+the user's question could plausibly be answered from a tag-filtered slice:
+
+```
+# 1. session_init.manifest.tags_top already tells you:
+#    [{"tag": "client-thryv", "count": 47},
+#     {"tag": "sprint-planning", "count": 23}, ...]
+
+# 2. Need the full corpus? Paginate the list:
+list_tags(limit=500)                                    # {tags: [...], total: N}
+
+# 3. Need to know what else co-occurs with a tag? (e.g., for scoping a
+#    multi-tag AND search, or understanding cross-cutting themes):
+get_tag_neighbors("client-thryv", limit=10)
+# → [{"tag": "onboarding", "co_count": 12, "jaccard": 0.21}, ...]
+
+# 4. Drill into the intersection. tags= is AND semantics:
+search_entries(tags=["client-thryv", "onboarding"], limit=20)
+
+# 5. Pick the most promising hit and fetch full content:
+get_entry(id)
+```
+
+**Worked example.** User asks "what do we know about Thryv onboarding?" —
+instead of keyword-searching ("onboarding" may be too broad across clients),
+look for `client-thryv` + `onboarding` in `tags_top`, call
+`get_tag_neighbors("client-thryv")` to confirm the co-occurrence, then
+`search_entries(tags=["client-thryv", "onboarding"])` returns the focused
+slice without pulling unrelated onboarding docs from other clients.
+
+### Narrowing at scale (L2+ guard)
+
+`get_index` applies a scale guard at `depth >= 2`: if the KB has more than
+200 visible published entries AND you pass no narrowing filter, the call
+returns **422** with body
+`{"error": "index_too_large", "total": N, "hint": "narrow with path=, content_type=, tag=, or use search_entries"}`.
+L1 (`get_index(depth=1)`) is always safe — category counts never blow the
+token budget.
+
+When you hit the guard, don't retry naively. Start from `session_init.manifest`
+and pick a narrowing axis before re-calling:
+
+```
+# session_init told you tags_top has {client-thryv: 47, sprint-planning: 23, ...}
+get_index(depth=3, tag="client-thryv")              # 47 entries — well under the guard
+# or, if you already know the path bucket from manifest.top_paths:
+get_index(depth=3, path="Projects/")
+# or drop to ranked search:
+search_entries(tags=["client-thryv", "sprint-planning"], limit=20)
+```
+
+`get_index` accepts only a single `tag=`; for multi-tag AND filtering, use
+`search_entries(tags=[...])`.
 
 ### Decision Framework
 
@@ -641,6 +700,8 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `import_vault_from_blob` | Bulk-import a previously-uploaded vault archive by `blob_id`; server-side `.zip` or `.tgz` walk (magic-byte sniff), same frontmatter + `[[wikilinks]]` pipeline as `import_vault`; 25MB compressed / 200MB uncompressed caps; returns `batch_id`. The remote-MCP-friendly bulk import path |
 | `rollback_import` | Reverse an import batch (archives entries, removes links, purges pending items) |
 | `suggest_tags` | Rank existing org tags by how well they match free-form content (deterministic, RLS-scoped) |
+| `list_tags` | Paginated full tag corpus with usage counts (count desc, tag asc; RLS-scoped) |
+| `get_tag_neighbors` | Tags that co-occur with a given tag (ranked by co-count + Jaccard similarity) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
 
 ## Auto-Save Rule

@@ -7,7 +7,7 @@ payload inlined every entry, every relationship, every summary, and the
 full content of every `system` entry — that routinely ballooned past 40K
 tokens on real-sized KBs and broke Claude Code sessions.
 
-New shape (v0.4.0 breaking change):
+New shape (v0.4.0 breaking change, + `tags_top` in v0.4.1):
 
     {
       "manifest": {
@@ -16,6 +16,7 @@ New shape (v0.4.0 breaking change):
         "user": {id, display_name, role, department, source},
         "categories":    [{content_type, count}, ...],
         "top_paths":     [{logical_path_prefix, count}, ...],   # up to 15
+        "tags_top":      [{tag, count}, ...],                    # up to 20
         "system_entries":[{id, title, logical_path}, ...],       # no content
         "pending_reviews": {count, items[0..5], review_url},
         "hints": ["call get_index(depth=3, path='Projects/') ...", ...]
@@ -36,6 +37,11 @@ router = APIRouter(tags=["session"])
 # Hard cap on top_paths rows — the agent can walk past the horizon with
 # get_index(path=...), so there is no value in dumping the long tail here.
 TOP_PATHS_LIMIT = 15
+
+# Hard cap on tags_top rows. Bounds the manifest's tag-triangulation surface
+# to a ~300-token footprint regardless of corpus size; the agent fetches the
+# full tag corpus via GET /tags / list_tags() when it needs more.
+TAGS_TOP_LIMIT = 20
 
 
 @router.get("")
@@ -101,6 +107,35 @@ async def session_init(
             for r in top_path_rows
         ]
 
+        # -------- top tags by published-entry count ---------------------
+        # Gives the agent the tag shape of the KB at session start so it
+        # can triangulate without fetching entries first. `tags` is TEXT[]
+        # with a GIN index (db/migrations/001_core.sql); unnest + GROUP BY
+        # on a ~5K-entry KB measures flat at sub-10ms locally.
+        #
+        # Empty-KB behavior: we ALWAYS emit `tags_top` (empty list when no
+        # tags exist) for shape consistency with `categories` / `top_paths`
+        # — the existing empty-KB test pattern in tests/test_session_init.py
+        # asserts those are `[]`, not missing. Staying consistent means
+        # agents / frontends never have to guard on key presence.
+        cur = await conn.execute(
+            """
+            SELECT unnest(tags) AS tag, count(*) AS count
+            FROM entries
+            WHERE status = 'published'
+            GROUP BY tag
+            ORDER BY count DESC, tag ASC
+            LIMIT %s
+            """,
+            (TAGS_TOP_LIMIT,),
+        )
+        cur.row_factory = dict_row
+        tags_top_rows = await cur.fetchall()
+        tags_top = [
+            {"tag": r["tag"], "count": r["count"]}
+            for r in tags_top_rows
+        ]
+
         # -------- system entries (handles only, no content) -------------
         cur = await conn.execute(
             """
@@ -159,7 +194,7 @@ async def session_init(
         }
 
         # -------- hints -------------------------------------------------
-        hints = _build_hints(total, top_paths, system_entries, pending_reviews)
+        hints = _build_hints(total, top_paths, tags_top, system_entries, pending_reviews)
 
         return {
             "manifest": {
@@ -174,6 +209,7 @@ async def session_init(
                 },
                 "categories": categories,
                 "top_paths": top_paths,
+                "tags_top": tags_top,
                 "system_entries": system_entries,
                 "pending_reviews": pending_reviews,
                 "hints": hints,
@@ -184,6 +220,7 @@ async def session_init(
 def _build_hints(
     total: int,
     top_paths: list[dict],
+    tags_top: list[dict],
     system_entries: list[dict],
     pending_reviews: dict,
 ) -> list[str]:
@@ -204,6 +241,12 @@ def _build_hints(
         first = top_paths[0]["logical_path_prefix"]
         hints.append(
             f"call get_index(depth=3, path='{first}/') to see titles and relationships under '{first}/'"
+        )
+
+    if tags_top:
+        first_tag = tags_top[0]["tag"]
+        hints.append(
+            f"triangulate by tag: call search_entries(tags=['{first_tag}']) — see manifest.tags_top for the top 20"
         )
 
     hints.append(

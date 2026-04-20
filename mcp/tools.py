@@ -109,6 +109,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         logical_path: str | None = None,
         department: str | None = None,
         tag: str | None = None,
+        tags: list[str] | None = None,
         fuzzy: bool = False,
         limit: int = 50,
         offset: int = 0,
@@ -117,6 +118,14 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
 
         Use `q` for full-text search (ranked by relevance). Without `q`, results
         are ordered by last update. Combine filters to narrow results.
+
+        Tag filtering:
+          tag   — single tag match (entry must contain this tag).
+          tags  — AND-match across multiple tags (entry must contain ALL
+                  listed tags). Use this for triangulation, e.g.
+                  tags=["client-thryv", "sprint-planning"] to find entries
+                  at the intersection. Mutually exclusive with `tag` —
+                  passing both returns a 422 error.
 
         Set `fuzzy=true` to enable a trigram-similarity fallback when the exact
         FTS query returns zero rows (e.g. a user typed "klaude" when they meant
@@ -128,7 +137,7 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         resource, department, team, system, onboarding.
         """
         user_id = _resolve_act_as_user_id()
-        params = {"limit": limit, "offset": offset}
+        params: dict = {"limit": limit, "offset": offset}
         if q:
             params["q"] = q
         if content_type:
@@ -139,6 +148,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["department"] = department
         if tag:
             params["tag"] = tag
+        if tags:
+            # httpx serialises a list value as repeated query params
+            # (?tags=a&tags=b), which is what the API's
+            # `tags: list[str] = Query(None)` expects. No manual
+            # querystring build needed.
+            params["tags"] = list(tags)
         if fuzzy:
             params["fuzzy"] = "true"
         return await api.get("/entries", params=params, act_as=user_id)
@@ -158,11 +173,12 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         depth: int = 3,
         path: str | None = None,
         content_type: str | None = None,
+        tag: str | None = None,
     ) -> dict:
         """Get a permission-filtered, tiered index of the entire knowledge base.
 
         Depth levels control how much detail is returned:
-          L1 — Category counts only (minimal tokens)
+          L1 — Category counts only (minimal tokens, always safe at any scale)
           L2 — + Document titles, IDs, paths, timestamps
           L3 — + Relationships between entries (recommended default)
           L4 — + Summaries for each entry
@@ -171,6 +187,19 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         Optional filters narrow the scope:
           path — logical_path prefix (e.g. 'Projects/' for project entries)
           content_type — specific type (e.g. 'decision', 'meeting')
+          tag — single tag match. For multi-tag AND filtering use
+                ``search_entries(tags=[...])`` — ``get_index`` only supports
+                one tag at a time.
+
+        Scale guard: at depth >= 2, if your KB has more than 200 visible
+        published entries AND you supply no narrowing filter, the endpoint
+        returns 422 with body
+        ``{"error": "index_too_large", "total": N, "hint": "..."}``. Start
+        from ``session_init.manifest`` (categories, top_paths, tags_top),
+        pick a narrowing axis (path, content_type, or tag), and re-call
+        ``get_index`` with that filter — or drop to ``search_entries`` for
+        ranked results. L1 (counts only) is unconstrained; call
+        ``get_index(depth=1)`` any time you just need category totals.
         """
         user_id = _resolve_act_as_user_id()
         params: dict = {"depth": depth}
@@ -178,6 +207,8 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
             params["path"] = path
         if content_type is not None:
             params["content_type"] = content_type
+        if tag is not None:
+            params["tag"] = tag
         return await api.get("/index", params=params, act_as=user_id)
 
     @mcp.tool()
@@ -240,6 +271,78 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         """
         user_id = _resolve_act_as_user_id()
         return await api.get("/session-init", act_as=user_id)
+
+    @mcp.tool()
+    async def list_tags(limit: int = 500, offset: int = 0) -> dict:
+        """List your org's full tag corpus with per-tag usage counts.
+
+        Returns a paginated view of every tag attached to a published entry
+        visible to you (RLS-filtered), ordered by usage count descending and
+        then tag alphabetically. Complements `session_init.manifest.tags_top`,
+        which is capped at 20 — use `list_tags` to reach the long tail.
+
+        Parameters:
+          limit   — page size, default 500, max 5000
+          offset  — pagination offset, default 0
+
+        Returns:
+          {
+            "tags":  [{"tag": "<name>", "count": <int>}, ...],
+            "total": <int>   # distinct tags visible to you
+          }
+
+        Empty-corpus orgs return `{"tags": [], "total": 0}` — not an error.
+        Pair with `search_entries(tag="<name>")` to drill into a specific tag.
+        """
+        user_id = _resolve_act_as_user_id()
+        return await api.get(
+            "/tags",
+            params={"limit": limit, "offset": offset},
+            act_as=user_id,
+        )
+
+    @mcp.tool()
+    async def get_tag_neighbors(tag: str, limit: int = 10) -> dict:
+        """List tags that frequently co-occur with ``tag`` on the same entry.
+
+        Use this to triangulate: given a known high-signal tag (e.g. a
+        client or project name you spotted in `session_init.manifest.tags_top`
+        or `list_tags`), discover which other tags are typically attached
+        to the same entries. The agent can then narrow further with
+        `search_entries(tags=[tag, neighbor])`.
+
+        Ranking is ``co_count`` descending, then ``jaccard`` descending,
+        then ``tag`` ascending for stable ordering. ``co_count`` is the
+        raw number of entries carrying both tags; ``jaccard`` normalises
+        that by the union size, so a rare-but-always-paired tag can
+        outrank a common tag that merely happens to overlap.
+
+        Parameters:
+          tag    — target tag to find neighbors for (path-escaped
+                   automatically; pass the raw tag string)
+          limit  — max neighbors to return, default 10, max 100
+
+        Returns:
+          {
+            "tag": "<input>",
+            "neighbors": [
+              {"tag": "<other>", "co_count": <int>, "jaccard": <float>},
+              ...
+            ]
+          }
+
+        Unknown or unused tags return ``{"tag": "<input>", "neighbors": []}``
+        with no error — treated as an empty co-occurrence set.
+        Complements `list_tags` (full corpus) and
+        `search_entries(tags=[...])` (intersect once you know what to
+        pair).
+        """
+        user_id = _resolve_act_as_user_id()
+        return await api.get(
+            f"/tags/{tag}/co-occurring",
+            params={"limit": limit},
+            act_as=user_id,
+        )
 
     @mcp.tool()
     async def suggest_tags(content: str, limit: int = 10) -> dict:
