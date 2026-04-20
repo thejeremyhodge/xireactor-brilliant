@@ -29,12 +29,19 @@ MCP_HOST_PORT="${DEFAULT_MCP_PORT}"
 API_URL="http://localhost:${API_HOST_PORT}"
 MCP_URL="http://localhost:${MCP_HOST_PORT}"
 readonly LOG_FILE="./install.log"
-readonly DEFAULT_KEY_OUT="./brilliant-credentials.txt"
+# Sprint 0044 T-0260 — installer no longer writes a credentials file by
+# default. The path below is only used by the headless-with-admin branch
+# (`--admin-email` + `--admin-password`), where `fetch_credentials_file`
+# curls `GET /credentials` after admin bootstrap and writes the six-field
+# block alongside the installer.
+readonly CREDENTIALS_FILE="./brilliant-credentials.txt"
 readonly HEALTH_TIMEOUT_SECONDS=60
-# shellcheck disable=SC2034
-readonly VERIFY_TIMEOUT_SECONDS=30
-# shellcheck disable=SC2034
 readonly POLL_INTERVAL_SECONDS=2
+# Window for the post-health admin-bootstrap to flush credentials into the
+# DB. `phase_up` returns as soon as `/health` is green, but the bootstrap
+# task can land a couple of seconds later — `fetch_credentials_file`
+# retries `GET /credentials` over this window before giving up.
+readonly CREDENTIALS_FETCH_TIMEOUT_SECONDS=15
 # Port-probe tuning: step size and maximum number of attempts per port.
 # 5 attempts at +10 each → 5442→5452→5462→5472→5482, then error out.
 readonly PORT_PROBE_STEP=10
@@ -44,15 +51,16 @@ readonly PORT_PROBE_MAX_TRIES=5
 
 ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
+ADMIN_PASSWORD_FROM_ARGV=0
 ADMIN_API_KEY=""
 POSTGRES_PASSWORD=""
 ANTHROPIC_API_KEY=""
-KEY_OUT="${DEFAULT_KEY_OUT}"
 FORCE=0
 NO_INSTALL_DOCKER=0
 DRY_RUN=0
 MIGRATE_FROM_CORTEX=0
 SEED_DEMO=0
+HEADLESS=0
 REF=""
 REF_EXPLICIT=0
 CLONE_DIR="${DEFAULT_CLONE_DIR}"
@@ -90,12 +98,6 @@ mask() {
 rand_hex() {
   # $1 byte count — openssl rand -hex gives 2*N hex chars
   openssl rand -hex "$1"
-}
-
-rand_password() {
-  # URL-safe printable: base64 then strip padding/slashes/plus.
-  # $1 byte count (resulting string length >= ~$1 chars).
-  openssl rand -base64 "$1" | tr -d '=+/' | cut -c1-"$1"
 }
 
 # ---------- compose project naming (Sprint 0043 T-0259) ----------
@@ -183,35 +185,6 @@ phase_port_probe() {
   fi
 }
 
-# ---------- path helpers ----------
-
-absolutize_path() {
-  # Convert a (potentially relative) path to an absolute path anchored at
-  # the current working directory. Does NOT require the path to exist yet
-  # — we may be resolving $KEY_OUT before it has been written. We resolve
-  # the parent directory (which does exist, since write_key_out checks for
-  # it) and append the basename. Works on Mac + Linux without realpath.
-  # $1 path
-  local path="$1"
-  case "$path" in
-    /*) printf '%s' "$path" ;;  # already absolute
-    *)
-      local dir base
-      dir="$(dirname "$path")"
-      base="$(basename "$path")"
-      # cd into the dir in a subshell so we don't pollute the caller's cwd.
-      if [ -d "$dir" ]; then
-        printf '%s/%s' "$(cd "$dir" && pwd)" "$base"
-      else
-        # Parent doesn't exist (yet). Fall back to $PWD join — caller
-        # will later fail the dir-check in write_key_out with a clear
-        # error, which is the right behavior.
-        printf '%s/%s' "$(pwd)" "$path"
-      fi
-      ;;
-  esac
-}
-
 # ---------- help ----------
 
 print_help() {
@@ -221,19 +194,36 @@ xiReactor Brilliant installer
 Usage:
   install.sh [flags]
 
-Required:
-  --admin-email EMAIL        Admin user email (used for login + bootstrap).
+Default (browser ceremony, no flags):
+  Stand up the stack, open /setup in your browser, exit. You complete
+  the form in the browser and download brilliant-credentials.txt from
+  the response page. No credentials file is written by the installer.
 
 Optional:
-  --admin-password PW        Admin password. Random if unset.
+  --headless, --no-browser   Skip the browser auto-open. Print the /setup
+                             URL with an SSH-tunnel hint so a VPS operator
+                             can complete the ceremony from their workstation
+                             over a forwarded port.
+  --admin-email EMAIL        Headless install (VPS / CI / scripted). When set,
+                             the installer writes ADMIN_EMAIL to .env, the
+                             admin user is bootstrapped on API boot, and after
+                             health-check the installer auto-writes
+                             ./brilliant-credentials.txt by curling
+                             /credentials with the minted admin key.
+                             Implies --headless. Pair with --admin-password.
+  --admin-password PW        Admin password for the headless path. When omitted
+                             alongside --admin-email on a TTY, the installer
+                             prompts for it interactively (read -s, double-entry
+                             confirm). Passing it on argv triggers a stderr
+                             warning — the value is visible in `ps` and shell
+                             history. Use the interactive form unless scripting.
   --admin-api-key KEY        Admin API key. Random (bkai_<hex>) if unset.
+                             Only consumed on the headless-with-admin path.
   --postgres-password PW     Postgres password. Random if unset.
   --anthropic-api-key KEY    Anthropic key for Tier 3 reviewer (opt-in).
-  --key-out PATH             Write admin API key to PATH (mode 600).
-                             Default: ./brilliant-credentials.txt
   --force                    Overwrite existing .env.
   --no-install-docker        Detect Docker only; fail if missing.
-  --dry-run                  Print the 8-phase plan and exit 0.
+  --dry-run                  Print the install plan and exit 0.
   --migrate-from-cortex      Upgrade a pre-rename cortex-* stack in place:
                              rename the cortex DB to brilliant, tear down old
                              containers, and bring up the renamed stack with
@@ -254,9 +244,17 @@ Optional:
   -h, --help                 Show this message.
 
 Examples:
+  # Default — browser opens to /setup.
+  ./install.sh
+
+  # Headless VPS, SSH-tunnel persona — installer prints the /setup URL.
+  ./install.sh --headless
+
+  # Headless scripted — installer writes brilliant-credentials.txt on its own.
+  ./install.sh --admin-email you@example.com --admin-password 's3cret!'
+
+  # Headless interactive — same as above but prompts for the password.
   ./install.sh --admin-email you@example.com
-  ./install.sh --admin-email you@example.com --key-out /tmp/key.txt
-  ./install.sh --dry-run --admin-email test@x.com
 
 HELP
 }
@@ -268,16 +266,15 @@ parse_flags() {
     case "$1" in
       --admin-email)         ADMIN_EMAIL="${2:-}"; shift 2 ;;
       --admin-email=*)       ADMIN_EMAIL="${1#*=}"; shift ;;
-      --admin-password)      ADMIN_PASSWORD="${2:-}"; shift 2 ;;
-      --admin-password=*)    ADMIN_PASSWORD="${1#*=}"; shift ;;
+      --admin-password)      ADMIN_PASSWORD="${2:-}"; ADMIN_PASSWORD_FROM_ARGV=1; shift 2 ;;
+      --admin-password=*)    ADMIN_PASSWORD="${1#*=}"; ADMIN_PASSWORD_FROM_ARGV=1; shift ;;
       --admin-api-key)       ADMIN_API_KEY="${2:-}"; shift 2 ;;
       --admin-api-key=*)     ADMIN_API_KEY="${1#*=}"; shift ;;
       --postgres-password)   POSTGRES_PASSWORD="${2:-}"; shift 2 ;;
       --postgres-password=*) POSTGRES_PASSWORD="${1#*=}"; shift ;;
       --anthropic-api-key)   ANTHROPIC_API_KEY="${2:-}"; shift 2 ;;
       --anthropic-api-key=*) ANTHROPIC_API_KEY="${1#*=}"; shift ;;
-      --key-out)             KEY_OUT="${2:-}"; shift 2 ;;
-      --key-out=*)           KEY_OUT="${1#*=}"; shift ;;
+      --headless|--no-browser) HEADLESS=1; shift ;;
       --force)               FORCE=1; shift ;;
       --no-install-docker)   NO_INSTALL_DOCKER=1; shift ;;
       --dry-run)             DRY_RUN=1; shift ;;
@@ -291,6 +288,121 @@ parse_flags() {
       *) die 64 "Unknown flag: $1 (try --help)" ;;
     esac
   done
+}
+
+# ---------- admin-flag validation + interactive password (Sprint 0044 T-0260) ----------
+
+validate_admin_flags() {
+  # Reject obvious nonsense before we touch the filesystem:
+  #   --admin-password without --admin-email is meaningless (no admin to
+  #   own the password) and tends to mask a typo.
+  if [ -z "$ADMIN_EMAIL" ] && [ -n "$ADMIN_PASSWORD" ]; then
+    die 64 "--admin-password requires --admin-email (no admin user to bind it to)"
+  fi
+}
+
+prompt_admin_password() {
+  # Headless-with-admin path. Only fires when --admin-email is set.
+  #   - If --admin-password was passed on argv: emit a one-line stderr
+  #     warning ("visible in ps / shell history — prefer interactive
+  #     entry") and return. CI escape valve.
+  #   - Else if stdin is a TTY: read -s twice with a confirm. Mismatch
+  #     dies (exit 64) without echoing either attempt.
+  #   - Else (non-TTY, no argv password): die with a clear message
+  #     telling the caller to pass --admin-password (or run on a TTY).
+  if [ -z "$ADMIN_EMAIL" ]; then
+    return 0
+  fi
+  if [ "$ADMIN_PASSWORD_FROM_ARGV" -eq 1 ]; then
+    printf 'WARNING: --admin-password on argv is visible in ps/shell history; prefer interactive entry.\n' >&2
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    die 64 "--admin-email passed but --admin-password is missing and stdin is not a TTY. Pass --admin-password explicitly or run interactively."
+  fi
+  local p1 p2
+  printf 'Admin password: ' >&2
+  IFS= read -rs p1 || die 64 "failed to read admin password"
+  printf '\n' >&2
+  printf 'Confirm:        ' >&2
+  IFS= read -rs p2 || die 64 "failed to read admin password confirmation"
+  printf '\n' >&2
+  if [ -z "$p1" ]; then
+    die 64 "admin password must not be empty"
+  fi
+  if [ "$p1" != "$p2" ]; then
+    die 64 "admin passwords did not match"
+  fi
+  ADMIN_PASSWORD="$p1"
+}
+
+# ---------- browser-open + credentials fetch (Sprint 0044 T-0260) ----------
+
+open_browser() {
+  # Best-effort browser open for the default ceremony path. Never fails the
+  # installer — if neither `open` (mac) nor `xdg-open` (linux) is present
+  # (e.g. bare-shell VPS that the user forgot to flag --headless on), the
+  # caller's URL-print fallback is the recovery surface.
+  local url="$1"
+  if command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 &
+    return 0
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
+    return 0
+  fi
+  return 1
+}
+
+fetch_credentials_file() {
+  # Headless-with-admin only. After admin bootstrap has flushed credentials
+  # to the DB, curl `GET /credentials` with the minted admin key and write
+  # the six-field shape to ./brilliant-credentials.txt (mode 600). Retries
+  # over CREDENTIALS_FETCH_TIMEOUT_SECONDS to tolerate slow bootstrap (the
+  # /health probe in phase_up is satisfied before lifespan finishes).
+  local path="$CREDENTIALS_FILE"
+  local waited=0
+  local tmp
+  tmp="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" RETURN
+  while [ "$waited" -lt "$CREDENTIALS_FETCH_TIMEOUT_SECONDS" ]; do
+    if curl -fsS \
+        -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+        -H "Accept: application/json" \
+        "${API_URL}/credentials" -o "$tmp" 2>/dev/null; then
+      # Re-format JSON → six `key=value` lines. No jq dep — grep + sed
+      # parse works because the response body is a flat object emitted by
+      # FastAPI's JSONResponse.
+      {
+        for k in admin_email admin_api_key oauth_client_id oauth_client_secret mcp_url login_url; do
+          local v
+          v="$(grep -oE "\"${k}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$tmp" | sed -E "s/.*\"${k}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/")"
+          printf '%s=%s\n' "$k" "$v"
+        done
+      } >"$path"
+      chmod 600 "$path"
+      log "phase 8" "credentials written to ${path} (mode 600, six fields)"
+      return 0
+    fi
+    sleep "$POLL_INTERVAL_SECONDS"
+    waited=$((waited + POLL_INTERVAL_SECONDS))
+  done
+
+  # Don't fail the installer — admin is up, the user just has to recover
+  # the file manually. Print the recovery snippet so they have it to hand.
+  log "phase 8" "WARN: /credentials fetch did not succeed within ${CREDENTIALS_FETCH_TIMEOUT_SECONDS}s"
+  cat >&2 <<RECOVER
+WARNING: failed to write ${CREDENTIALS_FILE}. The stack is healthy and the
+admin user is bootstrapped. To re-fetch the credentials block manually:
+
+  curl -H "Authorization: Bearer ${ADMIN_API_KEY}" \\
+       ${API_URL}/credentials > ${CREDENTIALS_FILE}
+  chmod 600 ${CREDENTIALS_FILE}
+
+RECOVER
+  return 1
 }
 
 # ---------- preflight ----------
@@ -331,10 +443,18 @@ phase_preflight() {
 # ---------- randoms fill ----------
 
 phase_randoms() {
+  # POSTGRES_PASSWORD is always randomized — compose needs it on every path
+  # and it's not user-facing. ADMIN_API_KEY is minted only on the headless-
+  # with-admin path so `fetch_credentials_file` can curl /credentials with
+  # a known Bearer; on the default browser-ceremony path the key is minted
+  # by the API at /setup time and delivered to the browser. ADMIN_PASSWORD
+  # is never auto-generated — `prompt_admin_password` already required the
+  # operator to provide one if they're on the headless-with-admin path.
   log "phase 4" "resolving randoms for unset values"
   : "${POSTGRES_PASSWORD:=$(rand_hex 24)}"
-  : "${ADMIN_PASSWORD:=$(rand_password 24)}"
-  : "${ADMIN_API_KEY:=bkai_$(rand_hex 24)}"
+  if [ -n "$ADMIN_EMAIL" ]; then
+    : "${ADMIN_API_KEY:=bkai_$(rand_hex 24)}"
+  fi
 }
 
 # ---------- phase stubs (filled in by later tasks) ----------
@@ -509,9 +629,15 @@ phase_env() {
   cp "./.env.sample" "./.env"
 
   set_env_var POSTGRES_PASSWORD "$POSTGRES_PASSWORD" "./.env"
-  set_env_var ADMIN_EMAIL       "$ADMIN_EMAIL"       "./.env"
-  set_env_var ADMIN_PASSWORD    "$ADMIN_PASSWORD"    "./.env"
-  set_env_var ADMIN_API_KEY     "$ADMIN_API_KEY"     "./.env"
+  # Sprint 0044 T-0260 — ADMIN_* are only written when the operator opted
+  # into the headless-with-admin path (--admin-email + --admin-password).
+  # On the default path these stay empty and `ensure_admin_user` no-ops,
+  # leaving the `/setup` web ceremony as the single admin-claim path.
+  if [ -n "$ADMIN_EMAIL" ]; then
+    set_env_var ADMIN_EMAIL    "$ADMIN_EMAIL"    "./.env"
+    set_env_var ADMIN_PASSWORD "$ADMIN_PASSWORD" "./.env"
+    set_env_var ADMIN_API_KEY  "$ADMIN_API_KEY"  "./.env"
+  fi
   if [ -n "$ANTHROPIC_API_KEY" ]; then
     set_env_var ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" "./.env"
   fi
@@ -563,128 +689,88 @@ phase_up() {
   die 3 "API did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s. See ${LOG_FILE}."
 }
 
-phase_verify() {
-  log "phase 7" "verifying admin API key against ${API_URL}/entries"
-  local waited=0
-  local http_code
-  while [ "$waited" -lt "$VERIFY_TIMEOUT_SECONDS" ]; do
-    http_code="$(curl -s -o /dev/null -w '%{http_code}' \
-      -H "Authorization: Bearer ${ADMIN_API_KEY}" \
-      "${API_URL}/entries" || true)"
-    if [ "$http_code" = "200" ]; then
-      log "phase 7" "admin key verified (HTTP 200 on /entries)"
-      return 0
-    fi
-    sleep "$POLL_INTERVAL_SECONDS"
-    waited=$((waited + POLL_INTERVAL_SECONDS))
-  done
-
-  log "phase 7" "admin verify failed after ${VERIFY_TIMEOUT_SECONDS}s (last status: ${http_code:-n/a})"
-  docker compose logs api --tail 50 2>&1 | tee -a "$LOG_FILE" || true
-  die 4 "Admin API key did not authenticate within ${VERIFY_TIMEOUT_SECONDS}s. See ${LOG_FILE}."
-}
-
-extract_credentials_block() {
-  # Scrape the machine-parseable credential block emitted by
-  # api/admin_bootstrap.py between ===BRILLIANT_CREDENTIALS_BEGIN=== and
-  # ===BRILLIANT_CREDENTIALS_END=== markers from the api container logs.
-  # Prints the inner block (six `key=value` lines) to stdout on success,
-  # or nothing on failure.
-  #
-  # Note: admin bootstrap runs exactly once at first boot, so the block
-  # will be present in the full container log history. We use `--no-color`
-  # to avoid ANSI escape noise when future loggers add color.
-  docker compose logs --no-color api 2>/dev/null \
-    | awk '
-        /===BRILLIANT_CREDENTIALS_BEGIN===/ { inblk=1; next }
-        /===BRILLIANT_CREDENTIALS_END===/   { inblk=0 }
-        inblk {
-          # docker-compose log lines look like:
-          #   brilliant-api  | admin_email=foo@bar.com
-          # Strip the "containername ... | " prefix (the pipe is
-          # reliable). Fall back to the whole line if no pipe is found
-          # (older compose formats or custom formatters).
-          pipe = index($0, "|")
-          if (pipe > 0) {
-            line = substr($0, pipe + 1)
-            sub(/^[[:space:]]+/, "", line)
-          } else {
-            line = $0
-          }
-          if (line ~ /^[a-z_]+=/) print line
-        }
-      ' \
-    | tail -n 6
-}
-
-write_key_out() {
-  # Write the six-field credential block to $1 (mode 600). Fields are
-  # extracted from `docker compose logs api` via extract_credentials_block;
-  # when the scrape fails (e.g. logs rolled, DRY_RUN, or bootstrap hit the
-  # latch on a re-run), fall back to the in-memory ADMIN_API_KEY + email so
-  # the install still produces a credentials file — just a thinner one.
-  local path="$1"
-  local dir
-  dir="$(dirname "$path")"
-  if [ ! -d "$dir" ]; then
-    die 75 "key-out directory does not exist: $dir"
-  fi
-
-  local block
-  block="$(extract_credentials_block || true)"
-  # Count non-empty key=value lines.
-  local line_count=0
-  if [ -n "$block" ]; then
-    line_count="$(printf '%s\n' "$block" | grep -c '=')"
-  fi
-
-  {
-    if [ "$line_count" -ge 6 ]; then
-      printf '%s\n' "$block"
-    else
-      # Fallback path — bootstrap block not found (log rolled, already
-      # bootstrapped, etc). Emit what we have; downstream tooling can
-      # still read admin_email + admin_api_key.
-      printf 'admin_email=%s\n'     "$ADMIN_EMAIL"
-      printf 'admin_api_key=%s\n'   "$ADMIN_API_KEY"
-      printf 'oauth_client_id=%s\n'     ""
-      printf 'oauth_client_secret=%s\n' ""
-      printf 'mcp_url=%s\n'         "${MCP_URL}"
-      printf 'login_url=%s\n'       "${API_URL}/auth/login"
-    fi
-  } >"$path"
-  chmod 600 "$path"
-}
-
 phase_summary() {
-  log "phase 8" "writing credentials to ${KEY_OUT}"
-  write_key_out "$KEY_OUT"
+  # Three branches keyed off (HEADLESS, ADMIN_EMAIL):
+  #   - default ceremony (HEADLESS=0, no ADMIN_EMAIL): browser auto-open,
+  #     /setup CTA, no creds file written.
+  #   - headless no-admin (HEADLESS=1, no ADMIN_EMAIL): URL-print +
+  #     SSH-tunnel hint, no browser-open, no creds file.
+  #   - headless with admin (ADMIN_EMAIL set; HEADLESS implicit): no
+  #     browser-open, no /setup CTA (latch is already claimed by env-
+  #     bootstrap), creds file auto-written via fetch_credentials_file.
+  #
+  # The Services + Stop blocks are identical across branches.
 
-  # The banner prints to stdout only (not the log) — this is what the
-  # operator reads at the end of a successful run. Sprint 0043 #42 reshape:
-  # lead with /setup + /import/vault (the URLs that actually matter to a
-  # first-run user), show the absolute Key file path so it resolves after
-  # the installer exits from any CWD, and document the stop / full-reset
-  # off-ramps so there's no "how do I turn this off?" guesswork.
+  local mode
+  if [ -n "$ADMIN_EMAIL" ]; then
+    mode="headless-with-admin"
+  elif [ "$HEADLESS" -eq 1 ]; then
+    mode="headless"
+  else
+    mode="default"
+  fi
+  log "phase 8" "summary mode: ${mode}"
+
+  # Headless-with-admin writes the creds file BEFORE the banner so the
+  # banner can reference its presence (or absence on the warning path).
+  if [ "$mode" = "headless-with-admin" ]; then
+    fetch_credentials_file || true
+  fi
+
   cat <<BANNER
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   xiReactor Brilliant installed successfully
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Next steps — open these in a browser:
-    Setup:        ${API_URL}/setup
-    Import vault: ${API_URL}/import/vault
+BANNER
 
-  Credentials file (contains 6 fields — keep it safe):
-    ${KEY_OUT} (mode 600)
+  case "$mode" in
+    default)
+      cat <<NEXT
+  Next steps:
+    Your browser should be opening to:
+      ${API_URL}/setup
 
+    If it doesn't open automatically, paste the URL above into your
+    browser. Complete the form, then download brilliant-credentials.txt
+    from the response page.
+
+NEXT
+      ;;
+    headless)
+      cat <<NEXT
+  Next steps (headless / SSH-tunnel):
+    Complete setup in your browser at:
+      ${API_URL}/setup
+
+    On a remote VPS, forward the API port to your workstation first:
+      ssh -L ${API_HOST_PORT}:localhost:${API_HOST_PORT} user@host
+
+    then open the URL above on your workstation.
+
+NEXT
+      ;;
+    headless-with-admin)
+      cat <<NEXT
+  Credentials (admin bootstrapped via env):
+    File:         ${CREDENTIALS_FILE} (mode 600, six fields)
+    Admin email:  ${ADMIN_EMAIL}
+
+    To re-fetch this file later:
+      curl -H 'Authorization: Bearer <admin_api_key>' \\
+           ${API_URL}/credentials > ${CREDENTIALS_FILE}
+
+NEXT
+      ;;
+  esac
+
+  cat <<SERVICES
   Services:
     API:          ${API_URL}
     Health:       ${API_URL}/health
     MCP:          ${MCP_URL}
     Postgres:     localhost:${DB_HOST_PORT}
-    Admin email:  ${ADMIN_EMAIL}
 
   Stop / reset:
     docker compose down           # stop containers (preserves data)
@@ -692,7 +778,14 @@ phase_summary() {
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-BANNER
+SERVICES
+
+  # Default-mode browser-open is best-effort and runs after the banner so
+  # the user sees the fallback URL even if the open command swallows the
+  # event (e.g. no display server but `xdg-open` exits 0).
+  if [ "$mode" = "default" ]; then
+    open_browser "${API_URL}/setup" || true
+  fi
 }
 
 # ---------- demo seed (opt-in via --seed-demo) ----------
@@ -892,16 +985,26 @@ MIGRATED
 # ---------- dry-run plan ----------
 
 print_plan() {
+  local mode
+  if [ -n "$ADMIN_EMAIL" ]; then
+    mode="headless-with-admin (env-driven bootstrap + auto-written ${CREDENTIALS_FILE})"
+  elif [ "$HEADLESS" -eq 1 ]; then
+    mode="headless (URL-print, no browser-open, /setup ceremony in browser)"
+  else
+    mode="default (browser auto-open to /setup, no installer-written creds file)"
+  fi
   cat <<PLAN
 xiReactor Brilliant installer — dry-run plan (v${SCRIPT_VERSION})
 
+Install mode: ${mode}
+
 Resolved configuration:
-  admin-email:        ${ADMIN_EMAIL:-(required — none)}
+  admin-email:        ${ADMIN_EMAIL:-(unset — default ceremony path)}
   admin-password:     $(mask "${ADMIN_PASSWORD}")
   admin-api-key:      $(mask "${ADMIN_API_KEY}")
   postgres-password:  $(mask "${POSTGRES_PASSWORD}")
   anthropic-api-key:  $(mask "${ANTHROPIC_API_KEY}")
-  key-out:            ${KEY_OUT}
+  headless:           ${HEADLESS}
   force:              ${FORCE}
   no-install-docker:  ${NO_INSTALL_DOCKER}
   seed-demo:          ${SEED_DEMO}
@@ -913,13 +1016,14 @@ Planned phases:
   [phase 1b] self-clone  — if not inside a brilliant repo, git clone --ref into --dir and cd in
   [phase 2]  docker      — detect; install Colima (Mac) or get.docker.com (Linux) if missing
   [phase 3]  repo        — confirm we're inside the brilliant repo (docker-compose.yml present)
-  [phase 4]  randoms     — fill unset secrets via openssl rand
+  [phase 4]  randoms     — fill unset secrets via openssl rand (ADMIN_API_KEY only when --admin-email is set)
   [phase 4b] port-probe  — probe db/api/mcp host ports; shift by ${PORT_PROBE_STEP} up to ${PORT_PROBE_MAX_TRIES} tries on conflict
   [phase 5]  env         — write ./.env from .env.sample (mode 600); refuse overwrite without --force
+                          ADMIN_EMAIL/PASSWORD/API_KEY written only on the headless-with-admin path
   [phase 6]  up          — docker compose up -d, poll ${API_URL}/health for up to ${HEALTH_TIMEOUT_SECONDS}s
   [phase 6b] seed        — if --seed-demo: pipe db/seed/demo.sql through docker exec psql (skipped otherwise)
-  [phase 7]  verify      — GET ${API_URL}/entries with admin key to confirm bootstrap
-  [phase 8]  summary     — print banner, write key to ${KEY_OUT} (mode 600)
+  [phase 8]  summary     — print mode-specific banner; on default path open ${API_URL}/setup in the browser;
+                          on headless-with-admin path curl ${API_URL}/credentials → ${CREDENTIALS_FILE} (mode 600)
 
 PLAN
 }
@@ -929,19 +1033,16 @@ PLAN
 main() {
   parse_flags "$@"
 
-  # Resolve KEY_OUT to an absolute path BEFORE any `cd` into the self-
-  # cloned repo. This is load-bearing for two reasons:
-  #   1. The final banner prints $KEY_OUT and the operator often `cat`s it
-  #      from a different working directory — a relative path would break.
-  #   2. phase_self_clone cd's into $CLONE_DIR; a relative KEY_OUT would
-  #      silently end up inside the clone dir rather than beside the
-  #      installer invocation.
-  KEY_OUT="$(absolutize_path "$KEY_OUT")"
-
-  # --migrate-from-cortex is a dedicated upgrade path and does not require
-  # --admin-email — the admin user already exists in the preserved DB.
-  if [ "$MIGRATE_FROM_CORTEX" -eq 0 ] && [ -z "$ADMIN_EMAIL" ]; then
-    die 64 "--admin-email is required (try --help)"
+  # Sprint 0044 T-0260 — install no longer requires --admin-email. Default
+  # path stands the stack up and points the operator at `/setup`. The only
+  # required validation is the orphan check (--admin-password without
+  # --admin-email) and the headless-with-admin password prompt.
+  validate_admin_flags
+  if [ "$MIGRATE_FROM_CORTEX" -eq 0 ] && [ -n "$ADMIN_EMAIL" ]; then
+    # Implicit: passing --admin-email switches the installer into the
+    # headless scripted path (no browser-open, auto-write creds file).
+    HEADLESS=1
+    prompt_admin_password
   fi
 
   if [ "$MIGRATE_FROM_CORTEX" -eq 1 ]; then
@@ -966,8 +1067,9 @@ main() {
   if [ "$DRY_RUN" -eq 1 ]; then
     # Fill resolved randoms in memory so the plan masks sensibly — silently.
     : "${POSTGRES_PASSWORD:=$(rand_hex 24)}"
-    : "${ADMIN_PASSWORD:=$(rand_password 24)}"
-    : "${ADMIN_API_KEY:=bkai_$(rand_hex 24)}"
+    if [ -n "$ADMIN_EMAIL" ]; then
+      : "${ADMIN_API_KEY:=bkai_$(rand_hex 24)}"
+    fi
     print_plan
     exit 0
   fi
@@ -984,7 +1086,6 @@ main() {
   phase_port_probe
   phase_env
   phase_up
-  phase_verify
   phase_seed
   phase_summary
 }

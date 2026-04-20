@@ -54,16 +54,29 @@ jobs:
           set -euo pipefail
           SCRATCH="$(mktemp -d)"
           cd "$SCRATCH"
+          # Sprint 0044 T-0260/T-0261 — default (browser-ceremony) path:
+          # no --admin-email (would shift this into the headless-with-admin
+          # branch), no --key-out (flag removed). The smoke job drives the
+          # POST /setup ceremony itself, mirroring what an operator's
+          # browser would do.
           bash "$GITHUB_WORKSPACE/install.sh" \
             --ref "$SELF_CLONE_REF" \
             --dir ./clone \
-            --admin-email smoke-selfclone@example.com \
-            --force \
-            --key-out /tmp/self-clone-key.txt
-          test -f /tmp/self-clone-key.txt
+            --force
           test -d "$SCRATCH/clone/.git"
           curl -fsS http://localhost:8010/health >/dev/null
-          key="$(cat /tmp/self-clone-key.txt)"
+          # POST /setup to claim the admin latch and pull credentials out
+          # of the response body. The /setup HTML response includes the
+          # plaintext admin API key (bkai_…) exactly once.
+          curl -fsS -X POST http://localhost:8010/setup \
+            -d 'org_name=Smoke&email=smoke@example.com&password=TestPass123&password_confirm=TestPass123' \
+            -o /tmp/response.html
+          key="$(grep -oE 'bkai_[a-f0-9_]+' /tmp/response.html | head -1)"
+          if [ -z "$key" ]; then
+            echo "FAIL: could not extract bkai_ admin key from /setup response"
+            head -n 50 /tmp/response.html || true
+            exit 14
+          fi
           code="$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${key}" \
             http://localhost:8010/entries)"
