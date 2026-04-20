@@ -1,7 +1,12 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    container_name: brilliant-db
+    # No `container_name:` — Sprint 0043 T-0259. Hardcoded names collided
+    # across sibling installs (compose's default project name is the parent
+    # dir basename, which normalizes to `xireactor-brilliant` for every
+    # self-clone target). Compose auto-names containers as
+    # `${COMPOSE_PROJECT_NAME}-db-1` instead; install.sh mints a pwd-hashed
+    # project name into `.env` so two checkouts can coexist.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
@@ -31,7 +36,7 @@ services:
     build:
       context: .
       dockerfile: ./api/Dockerfile
-    container_name: brilliant-api
+    # No `container_name:` — see db service comment (T-0259).
     depends_on:
       db:
         condition: service_healthy
@@ -57,7 +62,7 @@ services:
 
   mcp:
     build: ./mcp
-    container_name: brilliant-mcp
+    # No `container_name:` — see db service comment (T-0259).
     depends_on:
       db:
         condition: service_healthy

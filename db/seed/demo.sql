@@ -4,7 +4,7 @@
 --
 -- This file is NOT in db/migrations/ and does NOT auto-run on a clean
 -- install. Opt in via `install.sh --seed-demo` (which applies this script
--- via `docker exec -i brilliant-db psql … < db/seed/demo.sql` after the
+-- via `docker compose exec -T db psql … < db/seed/demo.sql` after the
 -- stack is healthy). Remove at any time with:
 --
 --   python tools/remove_demo_data.py --yes

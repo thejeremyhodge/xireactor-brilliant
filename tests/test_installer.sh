@@ -241,4 +241,117 @@ for required_key in admin_email admin_api_key oauth_client_id oauth_client_secre
 done
 
 echo "[smoke] port-conflict scenario PASS"
+
+# ─────────────────────────────────────────────────────────────────────
+# Non-collision scenario (Sprint 0043 T-0259)
+#
+# Goal: two installs in separate dirs must produce independent compose
+# projects — so `docker compose up` in install #B does not RECREATE
+# install #A's containers (which would clobber A's pgdata volume with
+# B's Postgres password → PoolTimeout crashloop).
+#
+# Strategy:
+#   1. Capture install #A's state: COMPOSE_PROJECT_NAME from its .env,
+#      container IDs via `docker compose ps -q`.
+#   2. Copy this checkout to /tmp/bk-alt-$$/xireactor-brilliant (tree
+#      only — no .env, no .git, no install.log). rsync's --exclude is
+#      portable across mac + ubuntu-22.04 CI runners.
+#   3. Run install.sh from the copy. Port-probe shifts off whatever
+#      stack A is holding.
+#   4. Assert:
+#      - Copy's .env has a DIFFERENT COMPOSE_PROJECT_NAME.
+#      - Stack A's container IDs are unchanged (not Recreated).
+#      - Two distinct *_pgdata volumes exist in `docker volume ls`.
+#   5. Tear down stack B (from the copy dir) before the EXIT trap runs.
+# ─────────────────────────────────────────────────────────────────────
+
+echo "[smoke] non-collision scenario: capturing install #A state"
+
+A_PROJECT="$(grep '^COMPOSE_PROJECT_NAME=' ./.env | head -n 1 | cut -d'=' -f2-)"
+if [ -z "$A_PROJECT" ]; then
+  echo "[smoke] FAIL: install #A .env missing COMPOSE_PROJECT_NAME (T-0259)" >&2
+  exit 30
+fi
+A_IDS_BEFORE="$(docker compose ps -q | sort | tr '\n' ' ')"
+if [ -z "$A_IDS_BEFORE" ]; then
+  echo "[smoke] FAIL: install #A has no running containers before sibling install" >&2
+  exit 31
+fi
+echo "[smoke] install #A: project=${A_PROJECT} ids=${A_IDS_BEFORE}"
+
+ALT_ROOT="/tmp/bk-alt-$$"
+ALT_DIR="${ALT_ROOT}/xireactor-brilliant"
+ALT_KEY_FILE="/tmp/brilliant-smoke-alt-key.$$.txt"
+ALT_SUMMARY_FILE="/tmp/brilliant-smoke-alt-summary.$$.txt"
+
+noncollision_cleanup() {
+  # Tear down stack B from its own dir so its project (not A's) is targeted.
+  if [ -d "$ALT_DIR" ] && [ -f "$ALT_DIR/docker-compose.yml" ]; then
+    ( cd "$ALT_DIR" && docker compose down -v 2>/dev/null || true )
+  fi
+  rm -rf "$ALT_ROOT" 2>/dev/null || true
+  rm -f "$ALT_KEY_FILE" "$ALT_SUMMARY_FILE" 2>/dev/null || true
+}
+# Chain: non-collision cleanup → conflict cleanup → baseline cleanup.
+trap 'noncollision_cleanup; conflict_cleanup; cleanup' EXIT
+
+echo "[smoke] copying tree to ${ALT_DIR} for install #B"
+mkdir -p "$ALT_DIR"
+# rsync with exclusions: skip .git (huge), .env + install.log + creds (stale),
+# node_modules if it exists, and any tmp/test artifacts.
+rsync -a \
+  --exclude='.git' \
+  --exclude='.env' \
+  --exclude='install.log' \
+  --exclude='brilliant-credentials.txt' \
+  --exclude='*.pyc' \
+  --exclude='__pycache__' \
+  ./ "$ALT_DIR/"
+
+REPO_DIR="$(pwd)"
+cd "$ALT_DIR"
+
+echo "[smoke] running ./install.sh in ${ALT_DIR} (install #B)"
+./install.sh \
+  --admin-email smoke-alt@example.com \
+  --force \
+  --key-out "$ALT_KEY_FILE" \
+  | tee "$ALT_SUMMARY_FILE"
+
+B_PROJECT="$(grep '^COMPOSE_PROJECT_NAME=' ./.env | head -n 1 | cut -d'=' -f2-)"
+if [ -z "$B_PROJECT" ]; then
+  echo "[smoke] FAIL: install #B .env missing COMPOSE_PROJECT_NAME" >&2
+  exit 32
+fi
+if [ "$A_PROJECT" = "$B_PROJECT" ]; then
+  echo "[smoke] FAIL: install #A and #B share COMPOSE_PROJECT_NAME (${A_PROJECT}) — T-0259 regression" >&2
+  exit 33
+fi
+echo "[smoke] install #B: project=${B_PROJECT} (distinct from #A: ${A_PROJECT})"
+
+# Stack A's containers must not have been recreated. Compare sorted IDs
+# before/after. Any mismatch means compose touched A's containers.
+cd "$REPO_DIR"
+A_IDS_AFTER="$(docker compose ps -q | sort | tr '\n' ' ')"
+if [ "$A_IDS_BEFORE" != "$A_IDS_AFTER" ]; then
+  echo "[smoke] FAIL: install #A's container IDs changed after install #B ran" >&2
+  echo "[smoke] before: ${A_IDS_BEFORE}" >&2
+  echo "[smoke] after:  ${A_IDS_AFTER}" >&2
+  exit 34
+fi
+echo "[smoke] install #A containers intact (IDs unchanged)"
+
+# Two distinct pgdata volumes must exist — one per project.
+if ! docker volume ls --format '{{.Name}}' | grep -q "^${A_PROJECT}_pgdata$"; then
+  echo "[smoke] FAIL: expected volume ${A_PROJECT}_pgdata in docker volume ls" >&2
+  docker volume ls --format '{{.Name}}' | grep -E '_pgdata$' >&2 || true
+  exit 35
+fi
+if ! docker volume ls --format '{{.Name}}' | grep -q "^${B_PROJECT}_pgdata$"; then
+  echo "[smoke] FAIL: expected volume ${B_PROJECT}_pgdata in docker volume ls" >&2
+  docker volume ls --format '{{.Name}}' | grep -E '_pgdata$' >&2 || true
+  exit 36
+fi
+
+echo "[smoke] non-collision scenario PASS (two independent stacks)"
 echo "[smoke] PASS (all scenarios)"

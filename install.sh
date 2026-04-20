@@ -98,6 +98,26 @@ rand_password() {
   openssl rand -base64 "$1" | tr -d '=+/' | cut -c1-"$1"
 }
 
+# ---------- compose project naming (Sprint 0043 T-0259) ----------
+
+compute_compose_project_name() {
+  # Deterministic compose project name derived from the install dir's
+  # absolute path. Fixes the T-0259 collision: compose's default project
+  # name is the parent-dir basename, so every self-clone into the default
+  # `./xireactor-brilliant` dir resolved to the same project `xireactor-
+  # brilliant`. Two such installs on one host would share container names
+  # and the `pgdata` volume prefix, causing `docker compose up` to
+  # recreate the sibling stack against a mismatched `.env` password.
+  #
+  # The hash is sha256 truncated to 8 hex chars, derived via openssl
+  # (already a hard dep) so we don't rely on `sha1sum` / `md5sum` (GNU-
+  # only) or `shasum` (mac-only).
+  local path hash
+  path="$(pwd)"
+  hash="$(printf '%s' "$path" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-8)"
+  printf 'brilliant-%s' "$hash"
+}
+
 # ---------- port probing (Sprint 0043 T-0257) ----------
 
 port_in_use() {
@@ -509,6 +529,16 @@ phase_env() {
   set_env_var MCP_BASE_URL       "$MCP_URL"       "./.env"
   set_env_var API_BASE_URL       "$API_URL"       "./.env"
 
+  # Sprint 0043 T-0259 — mint a pwd-derived COMPOSE_PROJECT_NAME so two
+  # installs on the same host land in distinct compose projects (distinct
+  # container names, distinct `pgdata` volume). Without this, `docker
+  # compose up` in a second install RECREATES the first install's
+  # containers against a mismatched `.env`.
+  local project_name
+  project_name="$(compute_compose_project_name)"
+  set_env_var COMPOSE_PROJECT_NAME "$project_name" "./.env"
+  log "phase 5" "compose project: ${project_name} (derived from $(pwd))"
+
   chmod 600 "./.env"
   log "phase 5" ".env generated at ./.env (mode 600)"
 }
@@ -690,14 +720,17 @@ phase_seed() {
     die 84 "demo seed file not found at ${seed_path} — is this the brilliant repo?"
   fi
 
-  # Pipe the SQL into the running brilliant-db container. We do NOT cd into
-  # the container or bind-mount the file — `docker exec -i` + STDIN redirect
-  # is portable and does not need any compose-file changes.
+  # Pipe the SQL into the db service via `docker compose exec -T`. Post-
+  # T-0259 we no longer hardcode `container_name: brilliant-db` in
+  # docker-compose.yml, so `docker exec brilliant-db` would miss the
+  # container (it's now named ${COMPOSE_PROJECT_NAME}-db-1). Compose-exec
+  # resolves the service regardless of the project's container-name
+  # scheme. `-T` disables TTY allocation so the `<` redirect works.
   local pg_user pg_db
   pg_user="${POSTGRES_USER:-postgres}"
   pg_db="${POSTGRES_DB:-brilliant}"
 
-  if ! docker exec -i brilliant-db psql -U "$pg_user" -d "$pg_db" \
+  if ! docker compose exec -T db psql -U "$pg_user" -d "$pg_db" \
         -v ON_ERROR_STOP=1 < "$seed_path" 2>&1 | tee -a "$LOG_FILE"; then
     log "phase 6b" "demo seed psql failed — dumping db logs"
     docker compose logs db --tail 30 2>&1 | tee -a "$LOG_FILE" || true
@@ -788,10 +821,19 @@ phase_migrate_from_cortex() {
   log "migrate" "step 4: remove old cortex containers (data volume preserved)"
   run_cmd docker rm -f cortex-db cortex-api cortex-mcp
 
-  # Step 5: bring up the renamed stack. docker-compose.yml on this branch
-  # already names the containers brilliant-*.
-  log "migrate" "step 5: docker compose up -d --build (brilliant-*)"
+  # Step 5: bring up the renamed stack. Post-T-0259 docker-compose.yml no
+  # longer hardcodes `container_name:`, so we also mint a pwd-derived
+  # COMPOSE_PROJECT_NAME into `.env` before `docker compose up` — keeps
+  # migrated installs from colliding with any sibling brilliant checkout
+  # on the same host.
+  log "migrate" "step 5: docker compose up -d --build"
   if [ "$DRY_RUN" -eq 0 ]; then
+    if [ -f "./.env" ]; then
+      local project_name
+      project_name="$(compute_compose_project_name)"
+      set_env_var COMPOSE_PROJECT_NAME "$project_name" "./.env"
+      log "migrate" "compose project: ${project_name}"
+    fi
     docker compose up -d --build 2>&1 | tee -a "$LOG_FILE"
   else
     log "migrate" "\$ docker compose up -d --build"
@@ -813,24 +855,28 @@ phase_migrate_from_cortex() {
       docker compose logs api --tail 50 2>&1 | tee -a "$LOG_FILE" || true
       die 78 "brilliant-api did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s after migration. See ${LOG_FILE}."
     fi
-    if ! docker exec brilliant-db psql -U postgres -lqt | grep -q '\bbrilliant\b'; then
-      die 79 "brilliant database not found inside brilliant-db after migration. See ${LOG_FILE}."
+    # Post-T-0259: use `docker compose exec db` — no literal brilliant-db
+    # container name after we dropped `container_name:` from compose.
+    if ! docker compose exec -T db psql -U postgres -lqt | grep -q '\bbrilliant\b'; then
+      die 79 "brilliant database not found inside db service after migration. See ${LOG_FILE}."
     fi
-    log "migrate" "brilliant database present in brilliant-db"
+    log "migrate" "brilliant database present in db service"
   else
     log "migrate" "\$ curl -fsS ${API_URL}/health  (poll up to ${HEALTH_TIMEOUT_SECONDS}s)"
-    log "migrate" "\$ docker exec brilliant-db psql -U postgres -lqt | grep brilliant"
+    log "migrate" "\$ docker compose exec -T db psql -U postgres -lqt | grep brilliant"
   fi
 
   # Step 7: summary.
   log "migrate" "step 7: summary"
+  local summary_project
+  summary_project="$(compute_compose_project_name)"
   cat <<MIGRATED
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Migrated cortex → brilliant. Data preserved.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  New containers: brilliant-db, brilliant-api, brilliant-mcp
+  New services:   db, api, mcp (compose project: ${summary_project})
   Database:       brilliant (renamed from cortex, same data volume)
   API:            ${API_URL}
 
