@@ -87,6 +87,35 @@ def _login_url_from_request(request: Request) -> str:
     return f"{scheme}://{host}/auth/login"
 
 
+async def _services_ready(pool) -> bool:
+    """Return True iff both ``api_public_url`` and ``mcp_public_url`` are set.
+
+    The API and MCP services each publish their own
+    ``RENDER_EXTERNAL_URL`` into ``brilliant_settings`` at boot (migrations
+    029 and 032). On a cold Render deploy, one or both columns may still be
+    NULL at the instant the operator lands on ``/setup`` — if we don't warn
+    them, they'll paste a not-yet-resolvable URL into Claude and hit 502s.
+
+    Fail-closed semantics: any exception (missing singleton row, column not
+    yet migrated, DB unreachable) returns ``False`` so we show the banner
+    rather than silently suppress it. The banner is additive — it never
+    replaces the one-shot API key display.
+    """
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT api_public_url, mcp_public_url "
+                "FROM brilliant_settings WHERE id = 1"
+            )
+            row = await cur.fetchone()
+    except Exception:
+        return False
+
+    if not row:
+        return False
+    return bool(row[0]) and bool(row[1])
+
+
 async def _mcp_url_for_display(pool) -> str:
     """Render the MCP connector URL for display on ``/setup/done``.
 
@@ -237,6 +266,16 @@ def _render_setup_form(
 """
 
 
+_WARMING_BANNER = """<div class="warn" role="status">
+    <strong>Your Brilliant services are still warming up.</strong>
+    Your API key below is permanent and safe to save now — copy it before
+    doing anything else. One or both Brilliant services haven't finished
+    their first boot yet (this usually takes 30&ndash;60 seconds after a
+    fresh deploy). Wait for this banner to disappear before connecting
+    Claude, then refresh this page to re-check.
+  </div>"""
+
+
 def _render_done_page(
     email: str,
     api_key: str,
@@ -244,6 +283,7 @@ def _render_done_page(
     client_secret: str,
     mcp_url: str,
     login_url: str,
+    services_ready: bool = True,
 ) -> str:
     """Render the post-setup credentials page.
 
@@ -263,6 +303,14 @@ def _render_done_page(
 
     Client-side JS offers a clipboard-copy button per secret and a
     Blob-based ``brilliant-credentials.txt`` download listing all six.
+
+    When ``services_ready`` is False (``api_public_url`` or
+    ``mcp_public_url`` still NULL in ``brilliant_settings``), a
+    ``<div class="warn">`` "warming up" banner is prepended above the
+    one-shot secrets block. The banner is purely informational — no
+    ``meta http-equiv="refresh"`` is ever injected, since an auto-refresh
+    would obscure the plaintext API key that is only rendered in this
+    response. See spec 0042 / T-0251.
     """
     safe_email = _html.escape(email, quote=True)
     safe_key = _html.escape(api_key, quote=True)
@@ -280,6 +328,8 @@ def _render_done_page(
     js_mcp = _json.dumps(mcp_url)
     js_login = _json.dumps(login_url)
 
+    warming_banner = "" if services_ready else _WARMING_BANNER
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -292,6 +342,7 @@ def _render_done_page(
   <h1>You're live</h1>
   <p class="sub">Your admin account is created. Save these credentials now.</p>
 
+  {warming_banner}
   <div class="warn">
     <strong>This is the only time you'll see these secrets.</strong>
     Download the <code style="display:inline;padding:1px 5px;">.txt</code>
@@ -531,6 +582,7 @@ async def setup_submit(
 
     mcp_url = await _mcp_url_for_display(pool)
     login_url = _login_url_from_request(request)
+    services_ready = await _services_ready(pool)
 
     return HTMLResponse(
         _render_done_page(
@@ -540,6 +592,7 @@ async def setup_submit(
             client_secret=client_secret,
             mcp_url=mcp_url,
             login_url=login_url,
+            services_ready=services_ready,
         )
     )
 

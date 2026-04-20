@@ -150,6 +150,27 @@ async def _load_pending_authz(pool, tx: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+_EXPIRED_LINK_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign-in link expired — Brilliant</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{_BASE_STYLE}</style>
+</head>
+<body>
+  <h1>This sign-in link has expired</h1>
+  <p class="sub">Your authorization session is no longer valid.</p>
+  <div class="info">
+    This usually happens when too much time has passed, when the link has
+    already been used, or when services were still warming up from a fresh
+    deploy. Return to Claude and click <strong>Connect</strong> again to
+    start a fresh sign-in.
+  </div>
+</body>
+</html>"""
+
+
 def _render_login(tx: str, email: str = "", error: str | None = None) -> str:
     """Render the OAuth login form.
 
@@ -215,19 +236,23 @@ async def oauth_login_form(request: Request) -> HTMLResponse:
     - ``tx`` query param present.
     - Matching row in ``oauth_pending_authorizations`` with ``expires_at > now()``.
 
-    Any other state → 404. We intentionally do NOT distinguish missing vs
-    expired vs malformed ``tx`` — a client that hit a broken link can only
-    recover by restarting the OAuth flow from Claude, and a narrower error
-    would leak whether a given ``tx_id`` was ever issued.
+    Any other state → friendly HTML 404. We intentionally do NOT
+    distinguish missing vs expired vs malformed ``tx`` — a client that
+    hit a broken link can only recover by restarting the OAuth flow
+    from Claude, and a narrower error would leak whether a given
+    ``tx_id`` was ever issued. The response body is HTML (not JSON)
+    because this route is always reached via a browser redirect from
+    the MCP's ``/authorize`` hop, so the user needs human-readable
+    recovery guidance — see sprint 0042, T-0250.
     """
     tx = (request.query_params.get("tx") or "").strip()
     if not tx:
-        raise HTTPException(status_code=404, detail="Not found")
+        return HTMLResponse(_EXPIRED_LINK_HTML, status_code=404)
 
     pool = get_pool()
     row = await _load_pending_authz(pool, tx)
     if row is None:
-        raise HTTPException(status_code=404, detail="Not found")
+        return HTMLResponse(_EXPIRED_LINK_HTML, status_code=404)
 
     return HTMLResponse(_render_login(tx=tx))
 

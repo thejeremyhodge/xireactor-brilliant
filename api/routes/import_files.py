@@ -1092,6 +1092,17 @@ _VAULT_PAGE_STYLE = """
   .hidden { display: none; }
   details { margin-top: 8px; }
   summary { cursor: pointer; color: #444; font-size: 0.9rem; }
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid #ddd;
+    border-top-color: #111;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 """
 
 
@@ -1272,8 +1283,8 @@ def _render_vault_upload_page() -> str:
       if (ex) fd.append("excludes", ex);
 
       submitBtn.disabled = true;
-      submitBtn.textContent = "Uploading...";
-      renderPanel("info", "Uploading and importing... this can take a moment for large vaults.");
+      submitBtn.innerHTML = '<span class="spinner"></span>Uploading...';
+      renderPanel("info", '<span class="spinner"></span>Uploading and importing... this can take a moment for large vaults.');
 
       fetch("/import/vault-upload", {{
         method: "POST",
