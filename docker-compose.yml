@@ -58,6 +58,13 @@ services:
       # Fall back to canonical defaults when install.sh did not run.
       MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
       API_BASE_URL: ${API_BASE_URL:-http://localhost:8010}
+      # /setup display-URL resolvers (api/routes/setup.py::_mcp_url_for_display)
+      # read these directly; install.sh writes them to .env but compose must
+      # forward them into the container or the route falls back to :8011/:8010.
+      BRILLIANT_MCP_PUBLIC_URL: ${BRILLIANT_MCP_PUBLIC_URL:-}
+      BRILLIANT_API_PUBLIC_URL: ${BRILLIANT_API_PUBLIC_URL:-}
+      BRILLIANT_MCP_PORT: ${BRILLIANT_MCP_PORT:-}
+      BRILLIANT_API_PORT: ${BRILLIANT_API_PORT:-}
       # Shared HMAC secret for /oauth/login → /oauth/continue handoff. Must
       # match the MCP service's value. install.sh mints one into .env on
       # fresh installs (Sprint 0044 follow-up); Render generates+shares via
