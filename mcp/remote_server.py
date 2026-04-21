@@ -48,6 +48,116 @@ from tools import register_tools
 
 logger = logging.getLogger("brilliant.auth")
 
+
+# ---------------------------------------------------------------------------
+# RFC 6749 §2.3.1 Basic-auth bridge for /token
+# ---------------------------------------------------------------------------
+#
+# FastMCP's stock token handler validates the POST body twice — once in
+# `ClientAuthenticator.authenticate_request` for client credentials, once
+# in `AuthorizationCodeRequest` (pydantic) for grant fields — and BOTH
+# layers require `client_id` to be present as a form field. Spec-compliant
+# clients (e.g. `mcp-remote`) using `client_secret_basic` put credentials
+# in the Authorization header and MAY omit them from the form per RFC 6749
+# §2.3.1, which causes 401 "Missing client_id" and then the cosmetic
+# downstream "No code verifier saved for session" from mcp-remote's retry.
+#
+# We fix this at the ASGI edge: when `POST /token` arrives with an
+# `Authorization: Basic …` header and the urlencoded body lacks
+# `client_id` / `client_secret`, we decode the header and inject those
+# fields into the body before any FastMCP handler sees the request. Both
+# validation layers then see a well-formed POST-body form. Co-work's
+# POST-body flow is untouched (it never trips the "missing" branch).
+class _BasicAuthTokenBodyBridge:
+    """ASGI middleware that bridges Basic-auth /token requests to POST-body form."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != "/token"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        raw_headers = scope.get("headers") or []
+        header_lookup = {k: v for k, v in raw_headers}
+        auth = header_lookup.get(b"authorization", b"")
+        ctype = header_lookup.get(b"content-type", b"").decode("latin-1", "replace")
+        if not auth.startswith(b"Basic ") or "application/x-www-form-urlencoded" not in ctype:
+            await self.app(scope, receive, send)
+            return
+
+        import base64 as _b64
+        import binascii as _binascii
+        from urllib.parse import parse_qsl, unquote, urlencode
+
+        try:
+            decoded = _b64.b64decode(auth[6:]).decode("utf-8")
+            if ":" not in decoded:
+                raise ValueError("Basic auth missing ':' separator")
+            raw_id, raw_secret = decoded.split(":", 1)
+            basic_id = unquote(raw_id)
+            basic_secret = unquote(raw_secret)
+        except (ValueError, UnicodeDecodeError, _binascii.Error):
+            # Malformed Basic — let the downstream handler emit its own error.
+            await self.app(scope, receive, send)
+            return
+
+        body = bytearray()
+        more = True
+        while more:
+            msg = await receive()
+            body.extend(msg.get("body", b""))
+            more = msg.get("more_body", False)
+        body_bytes = bytes(body)
+
+        pairs = parse_qsl(
+            body_bytes.decode("utf-8", "replace"),
+            keep_blank_values=True,
+        )
+        keys = {k for k, _ in pairs}
+        mutated = False
+        if "client_id" not in keys:
+            pairs.append(("client_id", basic_id))
+            mutated = True
+        if "client_secret" not in keys:
+            pairs.append(("client_secret", basic_secret))
+            mutated = True
+
+        if not mutated:
+            new_body = body_bytes
+            new_headers = raw_headers
+        else:
+            new_body = urlencode(pairs).encode("utf-8")
+            new_headers = [
+                (k, v) for k, v in raw_headers if k != b"content-length"
+            ]
+            new_headers.append(
+                (b"content-length", str(len(new_body)).encode("latin-1"))
+            )
+
+        new_scope = dict(scope)
+        new_scope["headers"] = new_headers
+
+        sent = False
+
+        async def replay_receive():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {
+                    "type": "http.request",
+                    "body": new_body,
+                    "more_body": False,
+                }
+            return await receive()
+
+        await self.app(new_scope, replay_receive, send)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -669,8 +779,11 @@ def create_app():
         expose_headers=["mcp-session-id"],
         allow_credentials=True,
     )
+    app.add_middleware(_BasicAuthTokenBodyBridge)
     return app
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import uvicorn
+
+    uvicorn.run(create_app(), host="0.0.0.0", port=MCP_PORT)
