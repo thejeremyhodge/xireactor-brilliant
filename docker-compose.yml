@@ -58,6 +58,11 @@ services:
       # Fall back to canonical defaults when install.sh did not run.
       MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
       API_BASE_URL: ${API_BASE_URL:-http://localhost:8010}
+      # Shared HMAC secret for /oauth/login → /oauth/continue handoff. Must
+      # match the MCP service's value. install.sh mints one into .env on
+      # fresh installs (Sprint 0044 follow-up); Render generates+shares via
+      # render.yaml fromService.envVarKey.
+      OAUTH_HANDOFF_SECRET: ${OAUTH_HANDOFF_SECRET:-}
     restart: unless-stopped
 
   mcp:
@@ -80,6 +85,7 @@ services:
       MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
       MCP_PORT: "8001"
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-brilliant}
+      OAUTH_HANDOFF_SECRET: ${OAUTH_HANDOFF_SECRET:-}
     restart: unless-stopped
 
 volumes:

@@ -654,6 +654,13 @@ phase_env() {
   set_env_var BRILLIANT_MCP_PORT "$MCP_HOST_PORT" "./.env"
   set_env_var MCP_BASE_URL       "$MCP_URL"       "./.env"
   set_env_var API_BASE_URL       "$API_URL"       "./.env"
+  # Canonical names read by api/routes/setup.py::_mcp_url_for_display and
+  # mcp/client.py::_resolve_api_base_url. Without these, the /credentials
+  # page (and stdio MCP client) fall back to the hardcoded localhost:8011 /
+  # localhost:8010 defaults — which don't match the probed ports when the
+  # installer bumps to :8020/:8021 or higher.
+  set_env_var BRILLIANT_MCP_PUBLIC_URL "$MCP_URL" "./.env"
+  set_env_var BRILLIANT_API_PUBLIC_URL "$API_URL" "./.env"
 
   # Sprint 0043 T-0259 — mint a pwd-derived COMPOSE_PROJECT_NAME so two
   # installs on the same host land in distinct compose projects (distinct

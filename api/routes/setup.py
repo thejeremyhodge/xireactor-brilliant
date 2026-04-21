@@ -155,7 +155,8 @@ async def _mcp_url_for_display(pool) -> str:
     if not base:
         raw = os.getenv("BRILLIANT_MCP_PUBLIC_URL", "").strip()
         if not raw:
-            base = "http://localhost:8011"
+            port = os.getenv("BRILLIANT_MCP_PORT", "").strip() or "8011"
+            base = f"http://localhost:{port}"
         elif raw.startswith("http://") or raw.startswith("https://"):
             base = raw
         else:
