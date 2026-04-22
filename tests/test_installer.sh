@@ -273,6 +273,7 @@ ALT_SUMMARY_FILE="/tmp/brilliant-smoke-alt-summary.$$.txt"
 noncollision_cleanup() {
   # Tear down stack B from its own dir so its project (not A's) is targeted.
   if [ -d "$ALT_DIR" ] && [ -f "$ALT_DIR/docker-compose.yml" ]; then
+    # shellcheck disable=SC2015 # best-effort teardown; trailing `|| true` is intentional
     ( cd "$ALT_DIR" && docker compose down -v 2>/dev/null || true )
   fi
   rm -rf "$ALT_ROOT" 2>/dev/null || true
@@ -359,6 +360,7 @@ echo "[smoke] non-collision scenario PASS (two independent stacks)"
 echo "[smoke] headless-with-admin scenario: tearing down prior stacks"
 # Stack B (alt dir).
 if [ -d "$ALT_DIR" ] && [ -f "$ALT_DIR/docker-compose.yml" ]; then
+  # shellcheck disable=SC2015 # best-effort teardown; trailing `|| true` is intentional
   ( cd "$ALT_DIR" && docker compose down -v 2>/dev/null || true )
 fi
 # Stack A (this repo).
