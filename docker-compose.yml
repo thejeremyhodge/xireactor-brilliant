@@ -1,16 +1,31 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    container_name: brilliant-db
+    # No `container_name:` — Sprint 0043 T-0259. Hardcoded names collided
+    # across sibling installs (compose's default project name is the parent
+    # dir basename, which normalizes to `xireactor-brilliant` for every
+    # self-clone target). Compose auto-names containers as
+    # `${COMPOSE_PROJECT_NAME}-db-1` instead; install.sh mints a pwd-hashed
+    # project name into `.env` so two checkouts can coexist.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
       POSTGRES_DB: ${POSTGRES_DB:-brilliant}
     ports:
-      - "5442:5432"
+      # Host port is probed by install.sh (Sprint 0043 T-0257); falls back
+      # to 5442 when install.sh is not the entrypoint or no conflict was
+      # found. Container port is always 5432.
+      - "${BRILLIANT_DB_PORT:-5442}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d
+      # Init-scripts bind: read-only, migrations-only. A `.gitignore` guard in
+      # db/migrations/ blocks stray .sql files (e.g. an old 005_seed.sql
+      # revival) from being committed back into this mount, so the only
+      # Postgres auto-bootstrap inputs are the numbered schema migrations.
+      # Demo seed (opt-in via `install.sh --seed-demo`) is applied AFTER the
+      # stack is healthy via `docker exec -i brilliant-db psql … < db/seed/demo.sql`,
+      # never through this mount — see install.sh phase_seed.
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d brilliant"]
       interval: 5s
@@ -21,12 +36,14 @@ services:
     build:
       context: .
       dockerfile: ./api/Dockerfile
-    container_name: brilliant-api
+    # No `container_name:` — see db service comment (T-0259).
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "8010:8000"
+      # Parameterized for port-probe (Sprint 0043 T-0257). Container port
+      # is always 8000.
+      - "${BRILLIANT_API_PORT:-8010}:8000"
     volumes:
       - ./api:/app
     environment:
@@ -35,18 +52,38 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Sprint 0043 T-0257 — admin_bootstrap reads these when emitting
+      # the credential block so brilliant-credentials.txt carries the
+      # operator-visible URLs that match the host-side port bindings.
+      # Fall back to canonical defaults when install.sh did not run.
+      MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8010}
+      # /setup display-URL resolvers (api/routes/setup.py::_mcp_url_for_display)
+      # read these directly; install.sh writes them to .env but compose must
+      # forward them into the container or the route falls back to :8011/:8010.
+      BRILLIANT_MCP_PUBLIC_URL: ${BRILLIANT_MCP_PUBLIC_URL:-}
+      BRILLIANT_API_PUBLIC_URL: ${BRILLIANT_API_PUBLIC_URL:-}
+      BRILLIANT_MCP_PORT: ${BRILLIANT_MCP_PORT:-}
+      BRILLIANT_API_PORT: ${BRILLIANT_API_PORT:-}
+      # Shared HMAC secret for /oauth/login → /oauth/continue handoff. Must
+      # match the MCP service's value. install.sh mints one into .env on
+      # fresh installs (Sprint 0044 follow-up); Render generates+shares via
+      # render.yaml fromService.envVarKey.
+      OAUTH_HANDOFF_SECRET: ${OAUTH_HANDOFF_SECRET:-}
     restart: unless-stopped
 
   mcp:
     build: ./mcp
-    container_name: brilliant-mcp
+    # No `container_name:` — see db service comment (T-0259).
     depends_on:
       db:
         condition: service_healthy
       api:
         condition: service_started
     ports:
-      - "8011:8001"
+      # Parameterized for port-probe (Sprint 0043 T-0257). Container port
+      # is always 8001 (see MCP_PORT below).
+      - "${BRILLIANT_MCP_PORT:-8011}:8001"
     volumes:
       - ./mcp:/app
     environment:
@@ -55,6 +92,7 @@ services:
       MCP_BASE_URL: ${MCP_BASE_URL:-http://localhost:8011}
       MCP_PORT: "8001"
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-brilliant}
+      OAUTH_HANDOFF_SECRET: ${OAUTH_HANDOFF_SECRET:-}
     restart: unless-stopped
 
 volumes:

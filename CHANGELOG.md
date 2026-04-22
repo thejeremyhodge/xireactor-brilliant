@@ -20,6 +20,31 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Fixed
 - _nothing yet_
 
+## [0.5.1] — 2026-04-20 — Installer + Render unified on `/setup` web ceremony
+
+> **Breaking change:** `--key-out` removed from `install.sh`. The default install path no longer writes a credentials file to disk — the `/setup` web ceremony is the single source of truth, and `brilliant-credentials.txt` is delivered as a browser download from the response page. CI / scripted installs use the new headless install path (`--admin-email` + `--admin-password`), which env-bootstraps the admin and auto-writes `./brilliant-credentials.txt` after health-check.
+
+### Added
+- Unified installer + Render on the `/setup` web ceremony (closes [#46](https://github.com/thejeremyhodge/xireactor-brilliant/issues/46) and [#47](https://github.com/thejeremyhodge/xireactor-brilliant/issues/47)). The installer no longer env-bootstraps admin on the default path; the operator drives the same browser-based ceremony Render users see.
+- Browser auto-open on default install (macOS `open` / Linux `xdg-open` with URL-print fallback when neither binary is available). Failures never block the installer.
+- New `--headless` / `--no-browser` flag for VPS / CI / SSH-tunnel users — skips the browser auto-open and prints the `/setup` URL prominently with an SSH-tunnel hint (`ssh -L 8010:localhost:8010 user@host`).
+- New interactive password prompt when `--admin-email` is passed without `--admin-password` on a TTY — `read -s` with double-entry confirm; the password never appears in `ps` output or shell history.
+- Headless install with `--admin-email` + `--admin-password` auto-writes `./brilliant-credentials.txt` (mode 600, six fields) after health-check by curling `GET /credentials` with the minted admin key — no manual recovery `curl` required.
+
+### Changed
+- **BREAKING:** `--key-out` removed from `install.sh`; `KEY_OUT` / `DEFAULT_KEY_OUT` / `write_key_out` / `extract_credentials_block` / `absolutize_path` / `phase_verify` / `rand_password` deleted entirely. No installer-written credentials file on the default path.
+- `--admin-email` is no longer required on the default install path; the installer runs flag-free and points the operator at `/setup`. `--admin-email` / `--admin-password` now describe the headless install path explicitly in `--help`.
+- `--admin-password` on argv emits a one-line stderr warning ("password visible in `ps`/shell history — prefer interactive entry") but continues — CI-friendly escape valve.
+- `--admin-email` implies `--headless` (no browser opens when admin is being claimed via env bootstrap).
+- `phase_summary` banner reshaped into three branches: default (browser auto-open + `/setup` CTA), headless-no-admin (URL + SSH-tunnel hint), headless-with-admin (auto-written credentials file + `/credentials` re-fetch hint).
+- `.env.sample` — `ADMIN_EMAIL` / `ADMIN_PASSWORD` commented out with a note that they're now the headless install escape hatch.
+- README install section rewritten around the browser-auto-open + `/setup` flow; new "Headless install (VPS / CI / scripted)" subsection documents both the `--headless` SSH-tunnel and `--admin-email` / `--admin-password` scripted variants.
+- All Sprint 0043 polish (T-0253..T-0259) carried forward unchanged except the six-field credentials file composition: now either a browser deliverable (default path) or an installer-side `/credentials` fetch (headless-with-admin path).
+
+### Fixed
+- Installer banner pointing at `/setup` while the env-driven admin bootstrap had already claimed the latch (404 on click) — eliminated by removing the env-bootstrap path from the default install. Both lanes now share one ceremony.
+- Auto-generated admin password buried in `.env` and nowhere else — eliminated by removing the auto-generated password entirely. The operator either chooses the password in the `/setup` form (default) or supplies it interactively / on argv (headless).
+
 ## [0.5.0] — 2026-04-18 — OAuth user-bound authentication
 
 > **Breaking change:** Dynamic Client Registration on the MCP server is disabled. Every existing Claude Co-work connector must be re-provisioned with the `client_id` + `client_secret` shown on `/setup/done` (or recovered via `/auth/login`). Operators self-hosting before this release should treat `/setup` as a one-time reset surface after upgrading.
@@ -196,7 +221,8 @@ traversal via recursive CTEs, multi-tenant organizations with row-level security
 MCP integration for Claude Co-work and Claude Code (stdio + Streamable HTTP / OAuth 2.1),
 and Obsidian vault import with preview, collision detection, and batch rollback.
 
-[Unreleased]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.5.0...v0.5.1
 [0.3.0]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/thejeremyhodge/xireactor-brilliant/compare/v0.2.0...v0.2.1

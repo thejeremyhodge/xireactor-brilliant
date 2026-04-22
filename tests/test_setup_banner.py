@@ -16,6 +16,9 @@ plus the DB-reading helper (``_services_ready``) with a minimal async
 pool stub. A full wire-through-the-POST-handler test would flip the
 ``first_run_complete`` latch, poisoning the rest of the suite — and the
 unit tests here cover the same invariant without that side effect.
+
+Spec 0043 / T-0255 extends these tests with brand-header + pulsing-CTA
++ beforeunload + import-vault-fragment assertions.
 """
 
 from __future__ import annotations
@@ -32,7 +35,12 @@ _API_DIR = _REPO_ROOT / "api"
 if str(_API_DIR) not in sys.path:
     sys.path.insert(0, str(_API_DIR))
 
-from routes.setup import _render_done_page, _services_ready  # noqa: E402
+from routes.setup import (  # noqa: E402
+    _render_brand_header,
+    _render_done_page,
+    _render_setup_form,
+    _services_ready,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -183,3 +191,123 @@ def test_services_ready_false_on_db_error():
     # Fail-closed: any exception → show the banner (treat as "not ready")
     # rather than silently suppress it.
     assert _run(_services_ready(_BrokenPool())) is False
+
+
+# ---------------------------------------------------------------------------
+# Spec 0043 / T-0255 — brand header + pulsing CTA + beforeunload guard +
+# import-vault fragment link
+# ---------------------------------------------------------------------------
+
+
+def test_brand_header_renders_logo_title_and_tagline():
+    """The shared brand header renders the Brilliant mark + tagline.
+
+    The tagline copy must match the README hero ("One shared knowledge
+    base for your whole AI-enabled team") so first-run operators see
+    identical messaging across the landing page and the installer path.
+    """
+    header = _render_brand_header()
+
+    assert 'class="brand-header"' in header
+    # Logo SVG (gem-shape polygon + "Brilliant logo" aria label)
+    assert "Brilliant logo" in header
+    # Title SVG (xiReactor / Brilliant wordmark)
+    assert "xiReactor / Brilliant" in header
+    # Tagline must match the README hero copy verbatim.
+    assert (
+        "One shared knowledge base for your whole AI-enabled team"
+        in header
+    )
+
+
+def test_setup_form_includes_brand_header():
+    """The pre-claim /setup form also surfaces the brand mark."""
+    body = _render_setup_form()
+    assert 'class="brand-header"' in body
+    assert "Brilliant logo" in body
+    assert "One shared knowledge base for your whole AI-enabled team" in body
+
+
+def test_done_page_includes_brand_header_and_pulsing_cta():
+    """Credentials page must render brand + pulsing download CTA."""
+    body = _call_render(services_ready=True)
+
+    # Brand header assertions — same expectations as the shared helper.
+    assert 'class="brand-header"' in body
+    assert "Brilliant logo" in body
+    assert "xiReactor / Brilliant" in body
+    assert "One shared knowledge base for your whole AI-enabled team" in body
+
+    # Download CTA has the pulse class + matching keyframes + JS to
+    # clear the pulse on first click.
+    assert 'id="download"' in body
+    assert 'class="pulse"' in body
+    assert "@keyframes brilliant-pulse" in body
+    # Pulse clears via classList.remove on first click / ack.
+    assert 'classList.remove("pulse")' in body
+
+
+def test_done_page_beforeunload_guard_wired():
+    """beforeunload listener + its two clearing paths must be present."""
+    body = _call_render(services_ready=True)
+
+    # The listener itself.
+    assert "beforeunload" in body
+    assert "ev.preventDefault()" in body
+    # Two legitimate ways out: download click + saved-ack checkbox.
+    assert 'id="saved-ack-checkbox"' in body
+    assert "I've saved my credentials" in body
+    assert "clearGuard()" in body
+    # Dismiss sentinel persists to localStorage so the next page visit
+    # doesn't re-arm the pulse.
+    assert "brilliant_creds_downloaded" in body
+
+
+def test_done_page_import_vault_fragment_link():
+    """The Import Obsidian vault button carries #api_key=<key> + target=_blank.
+
+    The URL fragment is the handoff channel between /setup and
+    /import/vault — it never hits the server because fragments stay
+    client-side. The link must also open in a new tab so the operator's
+    current tab keeps showing the one-shot credentials.
+    """
+    body = _render_done_page(
+        email="admin@example.com",
+        api_key="bkai_plain_xyz_1234567890",
+        client_id="client-demo",
+        client_secret="secret-demo",
+        mcp_url="https://example.test/mcp",
+        login_url="https://example.test/auth/login",
+        services_ready=True,
+    )
+
+    # Fragment-carrying link present with the exact plaintext key.
+    assert "/import/vault#api_key=bkai_plain_xyz_1234567890" in body
+    # Opens in a new tab with rel=noopener to protect the credentials tab.
+    assert 'target="_blank"' in body
+    assert 'rel="noopener"' in body
+    # Label text cues the operator to what they're about to do.
+    assert "Import Obsidian vault" in body
+
+
+def test_done_page_html_escapes_api_key_in_fragment_href():
+    """API keys are alphanumeric in practice, but we still pass them
+    through html.escape to guard against a surprise URL-unfriendly
+    character ever reaching the href attribute. Confirm the helper is
+    in the chain by asserting the rendered href uses the escaped form.
+    """
+    # "<" in a key would explode the attribute if we didn't escape; this
+    # is a belt-and-braces check that the html.escape call is wired in.
+    body = _render_done_page(
+        email="admin@example.com",
+        api_key='abc"def<xyz',
+        client_id="cid",
+        client_secret="csecret",
+        mcp_url="https://example.test/mcp",
+        login_url="https://example.test/auth/login",
+        services_ready=True,
+    )
+    # Escaped attribute-safe form of the key must appear in the href.
+    assert "abc&quot;def&lt;xyz" in body
+    # The raw-unescaped combination must never appear inside an href="…".
+    assert 'href="/import/vault#api_key=abc"def<xyz"' not in body

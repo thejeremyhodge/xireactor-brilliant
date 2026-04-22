@@ -1112,17 +1112,23 @@ def _render_vault_upload_page() -> str:
     Self-contained: zero external fetches (no CDN, no webfonts, no images).
     The page:
 
-    1. On load, checks ``localStorage.brilliant_api_key``. If present the
+    1. On load, checks ``window.location.hash`` for an ``#api_key=<key>``
+       fragment (handoff from the ``/setup`` Import Vault button, spec
+       0043 / T-0255). If present, writes the key to
+       ``localStorage.brilliant_api_key`` and clears the fragment via
+       ``history.replaceState`` so the secret does not survive into the
+       visible URL / back-nav / copy-paste surface.
+    2. Then checks ``localStorage.brilliant_api_key``. If present the
        Bearer token is attached automatically to the POST; if absent, a
        password-style input renders with an optional "save in this browser"
        checkbox that writes the pasted key back to the same localStorage
        key so the next visit auto-populates.
-    2. On submit, POSTs multipart to ``/import/vault-upload`` with the
+    3. On submit, POSTs multipart to ``/import/vault-upload`` with the
        tarball file and optional ``source_vault`` / ``base_path`` /
        ``excludes`` fields.
-    3. On success, renders ``{created, staged, batch_id}`` inline plus a
+    4. On success, renders ``{created, staged, batch_id}`` inline plus a
        rollback hint pointing at the MCP ``rollback_import`` tool.
-    4. On HTTP error, renders the server's JSON ``detail`` verbatim — no
+    5. On HTTP error, renders the server's JSON ``detail`` verbatim — no
        generic fallback message.
     """
     # All JS lives in a single <script> block. Curly-braces intended for
@@ -1211,6 +1217,41 @@ def _render_vault_upload_page() -> str:
     var rememberInput = document.getElementById("remember");
     var submitBtn = document.getElementById("submit-btn");
     var resultPanel = document.getElementById("result");
+
+    // ----- URL-fragment handoff from /setup (spec 0043 / T-0255) -----
+    // The /setup credentials page renders an Import Obsidian vault
+    // button whose href carries the freshly-minted admin API key as a
+    // URL fragment (#api_key=...). Fragments never leave the browser,
+    // so the secret doesn't ride the wire to the server. We read it
+    // here, stuff it into localStorage so the form's fetch() can
+    // attach the Authorization header, populate the input field for
+    // operator visibility, and then replace history state so the
+    // fragment is scrubbed from the address bar / back-nav / copy-URL.
+    try {{
+      var rawHash = window.location.hash || "";
+      if (rawHash.length > 1) {{
+        var inner = rawHash.charAt(0) === "#" ? rawHash.slice(1) : rawHash;
+        var params = new URLSearchParams(inner);
+        var frag = params.get("api_key");
+        if (frag && frag.length > 0) {{
+          try {{
+            window.localStorage.setItem(STORAGE_KEY, frag);
+          }} catch (e) {{ /* localStorage disabled — continue with in-memory flow */ }}
+          if (apiKeyInput) {{
+            apiKeyInput.value = frag;
+          }}
+          // Strip the fragment from the visible URL. ``replaceState``
+          // does NOT trigger a navigation so the page state / form
+          // values are preserved.
+          if (window.history && typeof window.history.replaceState === "function") {{
+            window.history.replaceState(null, "", window.location.pathname + window.location.search);
+          }}
+        }}
+      }}
+    }} catch (e) {{
+      // URLSearchParams or history API unavailable — fall through to
+      // the normal localStorage / paste-your-key path.
+    }}
 
     var storedKey = null;
     try {{

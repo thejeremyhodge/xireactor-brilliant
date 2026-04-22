@@ -407,6 +407,36 @@ async def ensure_admin_user(pool) -> None:
         client_secret,
     )
 
+    # Sprint 0043 T-0253 — emit a machine-parseable credential block so
+    # install.sh can extract all six fields in one shot via
+    # `docker compose logs api` → grep between markers. Order matches the
+    # six-field contract documented in the spec:
+    #   admin_email, admin_api_key, oauth_client_id,
+    #   oauth_client_secret, mcp_url, login_url.
+    #
+    # The MCP_BASE_URL / API_BASE_URL env-var fallback structure is kept
+    # intentionally minimal here — T-0257 extends it to carry through the
+    # installer's port-probing output.
+    mcp_url = os.getenv("MCP_BASE_URL", "").strip() or "http://localhost:8011"
+    api_base = os.getenv("API_BASE_URL", "").strip() or "http://localhost:8010"
+    login_url = f"{api_base.rstrip('/')}/auth/login"
+    logger.warning(
+        "===BRILLIANT_CREDENTIALS_BEGIN===\n"
+        "admin_email=%s\n"
+        "admin_api_key=%s\n"
+        "oauth_client_id=%s\n"
+        "oauth_client_secret=%s\n"
+        "mcp_url=%s\n"
+        "login_url=%s\n"
+        "===BRILLIANT_CREDENTIALS_END===",
+        admin_email,
+        api_key_plaintext,
+        client_id,
+        client_secret,
+        mcp_url,
+        login_url,
+    )
+
 
 async def create_admin_via_post(
     pool, email: str, password: str, org_name: str = DEFAULT_ORG_NAME
