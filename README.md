@@ -85,16 +85,16 @@ Pipe the installer into `bash` from any directory — it will detect that it isn
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thejeremyhodge/xireactor-brilliant/main/install.sh \
-  | bash -s -- --admin-email you@example.com
+  | bash
 ```
 
-The installer prints a phased plan, stands the stack up, and finishes with a summary banner containing your admin API key. The same key is written to `./brilliant-credentials.txt` (mode 600, inside the cloned directory).
+The installer stands up the stack and opens `/setup` in your browser; complete the form and download `brilliant-credentials.txt` from the response page. No credentials file is written by the installer on this default path — the browser download is the single source of truth.
 
 To pin a specific version or track `main`, pass `--ref`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thejeremyhodge/xireactor-brilliant/main/install.sh \
-  | bash -s -- --admin-email you@example.com --ref v0.5.0
+  | bash -s -- --ref v0.5.1
 ```
 
 To pick a different clone target, pass `--dir /path/to/target`.
@@ -106,13 +106,13 @@ If you prefer to inspect the repo before running anything, clone it first. When 
 ```bash
 git clone https://github.com/thejeremyhodge/xireactor-brilliant.git
 cd xireactor-brilliant
-./install.sh --admin-email you@example.com
+./install.sh
 ```
 
 Dry-run the plan first if you want to see what it will do:
 
 ```bash
-./install.sh --dry-run --admin-email you@example.com
+./install.sh --dry-run
 ```
 
 All flags:
@@ -121,10 +121,63 @@ All flags:
 ./install.sh --help
 ```
 
-### First API call
+### Headless install (VPS / CI / scripted)
+
+When the installer is running on a host without a desktop browser — a VPS, a CI runner, or any "remote shell" environment — you have two paths.
+
+**SSH-tunnel variant (recommended for VPS operators with a workstation browser):**
 
 ```bash
-curl -H "Authorization: Bearer $(cat ./brilliant-credentials.txt)" \
+./install.sh --headless
+```
+
+The installer skips the browser auto-open, stands up the stack, and prints the `/setup` URL prominently along with an SSH-tunnel hint. Forward the API port from your workstation:
+
+```bash
+ssh -L 8010:localhost:8010 user@your-vps-host
+```
+
+…then open `http://localhost:8010/setup` in your workstation browser and complete the same ceremony as the default install. Download `brilliant-credentials.txt` from the response page.
+
+**Scripted variant (CI / fully unattended):**
+
+```bash
+# Recommended: interactive password prompt (TTY only).
+./install.sh --admin-email you@example.com
+# Installer prompts for password twice (read -s, no echo).
+```
+
+When `--admin-email` is passed without `--admin-password`, the installer prompts interactively on a TTY (double-entry confirm). After health-check, the installer auto-curls `GET /credentials` with the minted admin key and writes `./brilliant-credentials.txt` (mode 600, six fields) — no manual recovery curl required, no browser opens.
+
+For fully unattended CI runs where no TTY is available, pass the password on argv (CI-only escape valve):
+
+```bash
+./install.sh --admin-email you@example.com --admin-password 'CHANGE_ME'
+```
+
+The installer emits a one-line stderr warning that `--admin-password` is visible in `ps`/shell history; prefer the interactive form whenever a TTY is available. The credentials file is written exactly the same way.
+
+If the `./brilliant-credentials.txt` write ever fails (or if you lose the file), re-fetch it any time with:
+
+```bash
+curl -H 'Authorization: Bearer YOUR_ADMIN_API_KEY' \
+  http://localhost:8010/credentials > brilliant-credentials.txt
+```
+
+### First API call
+
+After completing `/setup` in your browser, copy the API key from the downloaded `brilliant-credentials.txt` (default location: `~/Downloads/brilliant-credentials.txt`) and call the API:
+
+```bash
+# After /setup, copy the API key from brilliant-credentials.txt:
+curl -H "Authorization: Bearer YOUR_ADMIN_API_KEY" \
+  http://localhost:8010/entries
+```
+
+If you have the file at a known path, you can extract the key inline:
+
+```bash
+curl -H "Authorization: Bearer $(grep '^admin_api_key=' ~/Downloads/brilliant-credentials.txt | cut -d= -f2)" \
   http://localhost:8010/entries
 ```
 

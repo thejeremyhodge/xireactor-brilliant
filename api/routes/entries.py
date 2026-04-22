@@ -585,7 +585,7 @@ async def append_entry(
                 user.id,
                 user.source,
                 None,  # change_summary
-                "appended",  # governance_action
+                "updated",  # governance_action
             ),
         )
 
