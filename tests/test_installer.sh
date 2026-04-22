@@ -188,12 +188,28 @@ fi
 # Give Docker a moment to actually bind the port before the probe runs.
 sleep 2
 
-# Sanity-check that the port really is occupied from the probe's POV.
-if command -v lsof >/dev/null 2>&1; then
-  if ! lsof -i :5442 -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "[smoke] FAIL: sentinel container did not bind 5442 (lsof view)" >&2
-    exit 21
+# Sanity-check that the port really is occupied from the installer's POV.
+# Use a TCP connect rather than `lsof -sTCP:LISTEN`: on Linux Docker
+# Engine setups without docker-proxy, the forwarded port is only a DNAT
+# rule and has no listening socket. A connect attempt (what nc -z does,
+# and what install.sh's port_in_use now checks) always succeeds when the
+# container is accepting forwarded traffic.
+port_bound=0
+for _ in 1 2 3 4 5; do
+  if command -v nc >/dev/null 2>&1 && nc -z localhost 5442 >/dev/null 2>&1; then
+    port_bound=1
+    break
   fi
+  if (exec 3<>/dev/tcp/127.0.0.1/5442) 2>/dev/null; then
+    exec 3<&- 3>&-
+    port_bound=1
+    break
+  fi
+  sleep 1
+done
+if [ "$port_bound" -eq 0 ]; then
+  echo "[smoke] FAIL: sentinel container did not bind 5442 (tcp connect)" >&2
+  exit 21
 fi
 
 echo "[smoke] running ./install.sh against contested :5442"

@@ -124,20 +124,22 @@ compute_compose_project_name() {
 
 port_in_use() {
   # Returns 0 (true) if TCP port $1 on localhost is occupied, 1 otherwise.
-  # Primary: `lsof -i :$port` (standard on Mac + most Linux distros).
-  # Fallback: `nc -z localhost $port` (BusyBox / slim containers).
-  # Both are silent on success/failure; we only care about the exit code.
+  # Tries lsof (fast, works on Mac / Docker Desktop) then nc (catches
+  # Linux Docker Engine setups where port-forwarding is a DNAT rule and
+  # no listening socket exists for lsof to see). Either positive wins.
   local port="$1"
   if command -v lsof >/dev/null 2>&1; then
-    lsof -i ":${port}" -sTCP:LISTEN >/dev/null 2>&1
-    return $?
+    if lsof -i ":${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
   fi
   if command -v nc >/dev/null 2>&1; then
-    nc -z localhost "${port}" >/dev/null 2>&1
-    return $?
+    if nc -z localhost "${port}" >/dev/null 2>&1; then
+      return 0
+    fi
   fi
-  # No probe tool available — assume the port is free. Better to try the
-  # bind than to spuriously fail before docker compose ever runs.
+  # No probe saw it occupied — treat as free. Better to try the bind than
+  # to spuriously fail before docker compose ever runs.
   return 1
 }
 
