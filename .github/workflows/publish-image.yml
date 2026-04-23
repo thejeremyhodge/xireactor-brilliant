@@ -18,7 +18,7 @@ jobs:
       matrix:
         include:
           - image: brilliant-api
-            context: ./api
+            context: .
             dockerfile: ./api/Dockerfile
           - image: brilliant-mcp
             context: ./mcp
