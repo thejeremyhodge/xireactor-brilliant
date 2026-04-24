@@ -70,6 +70,11 @@ services:
       # fresh installs (Sprint 0044 follow-up); Render generates+shares via
       # render.yaml fromService.envVarKey.
       OAUTH_HANDOFF_SECRET: ${OAUTH_HANDOFF_SECRET:-}
+      # Service key for MCP→API server-to-server calls. API validates inbound;
+      # mcp presents outbound — both services need it. install.sh mints one
+      # into .env on fresh installs (Sprint 0045 T-0264.2). Empty-default so
+      # compose doesn't crash when unset.
+      BRILLIANT_SERVICE_API_KEY: ${BRILLIANT_SERVICE_API_KEY:-}
     restart: unless-stopped
 
   mcp:
@@ -93,6 +98,16 @@ services:
       MCP_PORT: "8001"
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev}@db:5432/${POSTGRES_DB:-brilliant}
       OAUTH_HANDOFF_SECRET: ${OAUTH_HANDOFF_SECRET:-}
+      # Service key for MCP→API server-to-server calls. mcp presents this
+      # outbound; api validates inbound (Sprint 0045 T-0264.3). Empty-default
+      # so compose doesn't crash when unset.
+      BRILLIANT_SERVICE_API_KEY: ${BRILLIANT_SERVICE_API_KEY:-}
+      # Browser-visible URLs for the /authorize → /oauth/login 302 chain.
+      # `mcp/remote_server.py::_resolve_api_public_url` reads these to avoid
+      # falling back to the DB column path (Sprint 0045 T-0264.3). Empty-default
+      # so compose doesn't crash when unset.
+      BRILLIANT_API_PUBLIC_URL: ${BRILLIANT_API_PUBLIC_URL:-}
+      BRILLIANT_MCP_PUBLIC_URL: ${BRILLIANT_MCP_PUBLIC_URL:-}
     restart: unless-stopped
 
 volumes:

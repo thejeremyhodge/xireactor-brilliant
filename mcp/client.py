@@ -17,50 +17,28 @@ the tool handler before we ever get here.
 import os
 
 import httpx
-import psycopg
 
 
 def _resolve_api_base_url() -> str:
-    """Resolve the API's outbound-callable public base URL.
+    """Resolve the API's outbound-callable base URL (mcp → api tool calls).
 
-    Resolution order — first non-empty wins:
+    Env-only resolution (T-0264.4, Sprint 0045):
 
-    1. ``brilliant_settings.api_public_url`` — populated at API boot from
-       its own ``$RENDER_EXTERNAL_URL`` (migration 032). This is the
-       authoritative source on Render, where ``fromService.property:host``
-       only yields the internal service name (``brilliant-api``) that is
-       NOT publicly routable.
-    2. ``BRILLIANT_API_PUBLIC_URL`` — explicit operator override.
-    3. ``BRILLIANT_BASE_URL`` — legacy env var. On Render this is the bare
-       internal hostname; we prepend ``https://`` if no scheme is present.
-       Kept for local dev (``http://localhost:8010``) and custom deploys.
-    4. ``http://localhost:8010`` — local-dev last-resort default.
+    1. ``BRILLIANT_BASE_URL`` — the canonical outbound URL. Compose sets
+       this to ``http://api:8000`` (service-network address); ``render.yaml``
+       wires it via ``fromService.property:host`` (internal service name).
+       On Render this is bare; we prepend ``https://`` if no scheme is
+       present.
+    2. ``http://localhost:8010`` — last-resort default for local-dev /
+       debug runs without compose.
 
-    DB read is a one-time cost at client construction (module import in
-    ``remote_server.py`` / ``server.py``). A missing ``DATABASE_URL``, an
-    unreachable DB, or a pre-032 schema all fall through silently to the
-    env-var tier — tests and stdio-only deployments are unaffected.
+    DB read of ``brilliant_settings.api_public_url`` was removed. That
+    column is semantically the *browser-visible* URL (used by
+    ``mcp/remote_server.py::_resolve_api_public_url`` to build OAuth
+    redirects); reading it for outbound poisoned mcp→api calls any time
+    an operator set it for OAuth reasons. See ST-0209 / demo4 incident
+    for the exact failure this guards against.
     """
-    dsn = os.environ.get("DATABASE_URL", "").strip()
-    if dsn:
-        try:
-            with psycopg.connect(dsn) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT api_public_url FROM brilliant_settings WHERE id = 1"
-                    )
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        return str(row[0]).rstrip("/")
-        except Exception:  # noqa: BLE001 — pre-032 schema or DB down → env fallback
-            pass
-
-    raw = os.environ.get("BRILLIANT_API_PUBLIC_URL", "").strip()
-    if raw:
-        if not raw.startswith(("http://", "https://")):
-            raw = f"https://{raw}"
-        return raw.rstrip("/")
-
     raw = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").strip()
     if raw and not raw.startswith(("http://", "https://")):
         raw = f"https://{raw}"

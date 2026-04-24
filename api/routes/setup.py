@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import html as _html
 import json as _json
+import logging
 import os
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -39,6 +40,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from admin_bootstrap import FirstRunAlreadyClaimed, create_admin_via_post
 from auth import UserContext, get_current_user
 from database import get_pool
+
+logger = logging.getLogger("brilliant.setup")
 
 router = APIRouter(tags=["setup"])
 
@@ -725,10 +728,28 @@ async def setup_submit(
             status_code=400,
         )
 
+    # Read BRILLIANT_SERVICE_API_KEY from env BEFORE the bootstrap call so we
+    # can verify post-bootstrap that the stored bcrypt hash matches the
+    # plaintext the mcp container already holds (Sprint 0045 / ST-0209 #10c).
+    #
+    # `_create_admin_and_flip_latch` (see admin_bootstrap.py line ~165)
+    # already implements the env-then-generate contract:
+    #   service_api_key = os.getenv("BRILLIANT_SERVICE_API_KEY") or _generate()
+    # As long as docker-compose threads this env var into the api service
+    # (Sprint 0045 task 3), the helper will hash THAT value — so the mcp
+    # container's outbound `Authorization: Bearer <env_value>` is accepted
+    # by the api's bcrypt verification.
+    #
+    # Before Sprint 0045 the env var was never populated in the api
+    # container, so the helper always fell through to generation and the
+    # plaintext was discarded — breaking every mcp→api call on a fresh
+    # `/setup` install (demo4 incident, ST-0209).
+    env_service_key = os.getenv("BRILLIANT_SERVICE_API_KEY", "").strip()
+
     try:
         (
             api_key_plaintext,
-            _service_api_key,
+            service_api_key_used,
             client_id,
             client_secret,
             _user_id,
@@ -739,7 +760,32 @@ async def setup_submit(
         # Another request raced us to the latch — treat as sealed.
         raise HTTPException(status_code=404, detail="Not found")
 
-    # `_service_api_key` is intentionally NOT displayed: it's an
+    # Sanity-check the env-honoring contract: if BRILLIANT_SERVICE_API_KEY
+    # was in env at the time of bootstrap, the helper must have hashed it
+    # (not a freshly-generated value). A mismatch here means the compose
+    # env threading is broken in a subtle way (e.g. empty string vs unset,
+    # mid-request env reload) and is worth loud-logging — the mcp container
+    # will fail every outbound call and the operator needs to know.
+    if env_service_key and service_api_key_used != env_service_key:
+        logger.error(
+            "BRILLIANT_SERVICE_API_KEY mismatch after bootstrap: env was set "
+            "but _create_admin_and_flip_latch generated a fresh key. "
+            "MCP→API outbound will fail. Check docker-compose env threading."
+        )
+    elif env_service_key:
+        logger.info(
+            "Admin bootstrap stored bcrypt hash of env-supplied "
+            "BRILLIANT_SERVICE_API_KEY; MCP→API outbound will succeed."
+        )
+    else:
+        logger.warning(
+            "BRILLIANT_SERVICE_API_KEY not in env at /setup time; "
+            "bootstrap minted a fresh service key whose plaintext is now "
+            "discarded. MCP→API outbound will fail until the operator "
+            "recovers the plaintext (not possible without rotation)."
+        )
+
+    # `service_api_key_used` is intentionally NOT displayed: it's an
     # MCP-internal credential (the MCP service's outbound Bearer token for
     # API → act-as-user calls). Ops tooling reads it from env or DB; the
     # operator-facing ceremony only shows the four user-configurable fields
@@ -1081,3 +1127,146 @@ async def credentials_recovery(
         return HTMLResponse(_render_credentials_html(payload))
 
     return JSONResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# /credentials/claude-desktop-snippet — Sprint 0045 T-0264.5 (ST-0209 #14c)
+# ---------------------------------------------------------------------------
+#
+# Admin-gated helper that returns a drop-in Claude Desktop
+# ``claude_desktop_config.json`` snippet. install.sh curls this after
+# ``/setup`` success and writes ``./claude-desktop-snippet.json``; the
+# operator pastes the contents into
+# ``~/Library/Application Support/Claude/claude_desktop_config.json``.
+#
+# Payload shape (consumed by mcp-remote's ``--static-oauth-client-info``):
+#
+# .. code-block:: json
+#
+#     {
+#       "mcpServers": {
+#         "brilliant-local": {
+#           "command": "npx",
+#           "args": [
+#             "-y", "mcp-remote",
+#             "<mcp_url>",
+#             "--static-oauth-client-info", "<json-string>"
+#           ]
+#         }
+#       }
+#     }
+#
+# ``<json-string>`` is the raw ``oauth_clients.client_info`` JSONB
+# serialized inline — it already carries ``client_id``,
+# ``client_secret``, ``redirect_uris`` (Co-work + localhost after task 1),
+# ``scope`` (``"brilliant"``), and the pydantic defaults that
+# ``mcp-remote`` + FastMCP's ``/token`` handler both expect. Serializing
+# as-is (rather than hand-picking fields) means any future addition to
+# ``_build_cowork_client_info_json`` flows through automatically.
+
+
+async def _fetch_oauth_client_info(pool) -> dict:
+    """Return the raw ``client_info`` JSONB payload for the installed client.
+
+    Mirrors :func:`_fetch_oauth_client_creds` but returns the full
+    pydantic-model-shaped dict instead of just ``(client_id, client_secret)``.
+    mcp-remote's ``--static-oauth-client-info`` flag expects every field
+    that a DCR-registered client would have carried, so we hand back the
+    JSONB as a dict and let the caller re-serialize as JSON for the
+    command-line arg.
+
+    Raises HTTPException(500) if the table is empty OR the ``client_info``
+    column is somehow NULL/invalid JSON — admin_bootstrap always writes a
+    valid dict so either failure mode indicates DB corruption or an
+    incomplete bootstrap, and failing loud beats silently emitting a
+    snippet that Claude Desktop will reject.
+    """
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            SELECT client_info
+            FROM oauth_clients
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        row = await cur.fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=500,
+            detail="OAuth client not found; admin_bootstrap incomplete",
+        )
+
+    raw = row[0]
+    # psycopg decodes JSONB to a Python dict automatically. If a driver
+    # variant returns a str (e.g. some asyncpg configs), parse it here
+    # rather than leaving the caller to guess.
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="OAuth client_info is not valid JSON",
+            ) from exc
+
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=500,
+            detail="OAuth client_info is not a JSON object",
+        )
+
+    return raw
+
+
+@router.get("/credentials/claude-desktop-snippet")
+async def credentials_claude_desktop_snippet(
+    user: UserContext = Depends(get_current_user),
+) -> JSONResponse:
+    """Admin-gated Claude Desktop config snippet.
+
+    Emits the JSON fragment an operator pastes into
+    ``claude_desktop_config.json`` to wire Claude Desktop at
+    ``Brilliant`` via mcp-remote. Non-placeholder values: the MCP URL is
+    resolved via :func:`_mcp_url_for_display` (DB column +
+    ``BRILLIANT_MCP_PUBLIC_URL`` env fallback) and the
+    ``--static-oauth-client-info`` payload is the literal
+    ``oauth_clients.client_info`` JSONB row, serialized inline.
+
+    Auth: same contract as ``GET /credentials``
+    (:func:`auth.get_current_user` → 401 on missing/invalid Bearer;
+    :func:`_require_admin` → 403 for non-admin callers).
+
+    Response: always JSON. No content negotiation — this is a machine
+    surface consumed by install.sh and `curl`, not a human recovery page.
+    """
+    _require_admin(user)
+
+    pool = get_pool()
+
+    mcp_url = await _mcp_url_for_display(pool)
+    client_info = await _fetch_oauth_client_info(pool)
+
+    # Serialize the client_info dict inline for the command-line flag.
+    # mcp-remote accepts this as a single JSON string argument.
+    # ``sort_keys`` gives stable output so re-running the installer
+    # doesn't churn the written snippet file.
+    client_info_json = _json.dumps(client_info, sort_keys=True)
+
+    snippet = {
+        "mcpServers": {
+            "brilliant-local": {
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "mcp-remote",
+                    mcp_url,
+                    "--static-oauth-client-info",
+                    client_info_json,
+                ],
+            }
+        }
+    }
+
+    return JSONResponse(snippet)
