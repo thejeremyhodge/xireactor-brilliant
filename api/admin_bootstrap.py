@@ -53,6 +53,20 @@ logger = logging.getLogger("brilliant.admin_bootstrap")
 # the stored client_info via `UPDATE oauth_clients`.
 _CLAUDE_COWORK_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
 
+# Claude Desktop's local bridge (`npx mcp-remote`) uses a loopback
+# redirect_uri for the OAuth dance. mcp-remote picks the port at runtime
+# but 34999 is the canonical default documented in the emitted
+# claude-desktop-snippet.json. Pre-registering this URI alongside the
+# Co-work entry lets a single OAuth client serve both surfaces — the MCP
+# SDK's exact-match `redirect_uri` validation then accepts either.
+_CLAUDE_DESKTOP_LOOPBACK_REDIRECT_URI = "http://127.0.0.1:34999/oauth/callback"
+
+# The scope advertised to Co-work + Desktop clients. Must match the
+# `valid_scopes` list in ``mcp/remote_server.py::ClientRegistrationOptions``
+# (currently ``["brilliant"]``). Stored on ``client_info`` so mcp-remote's
+# ``scope=brilliant`` request passes exact-match validation on /authorize.
+_OAUTH_CLIENT_SCOPE = "brilliant"
+
 
 class FirstRunAlreadyClaimed(Exception):
     """Raised when admin bootstrap is attempted after `first_run_complete=TRUE`.
@@ -87,10 +101,22 @@ def _build_cowork_client_info_json(
     defaults, plus the four ``client_id``/``client_secret``/``issued_at``
     fields. We keep the API service free of an MCP-SDK dependency by
     hand-rolling the dict — the schema is stable in MCP SDK ≥1.0.
+
+    ``redirect_uris`` holds BOTH the Co-work hosted callback and the
+    Claude-Desktop loopback (mcp-remote) callback so a single
+    pre-registered client serves both surfaces — the MCP SDK validates
+    incoming ``redirect_uri`` values via exact-match against this list.
+    ``scope`` mirrors ``mcp/remote_server.py::ClientRegistrationOptions.valid_scopes``;
+    without it, mcp-remote's ``scope=brilliant`` request 400s on
+    ``/authorize`` because the SDK performs exact-match scope validation
+    when the client advertises a scope field.
     """
     return json.dumps(
         {
-            "redirect_uris": [_CLAUDE_COWORK_REDIRECT_URI],
+            "redirect_uris": [
+                _CLAUDE_COWORK_REDIRECT_URI,
+                _CLAUDE_DESKTOP_LOOPBACK_REDIRECT_URI,
+            ],
             "token_endpoint_auth_method": "client_secret_post",
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -98,6 +124,7 @@ def _build_cowork_client_info_json(
             "client_id": client_id,
             "client_secret": client_secret,
             "client_id_issued_at": issued_at,
+            "scope": _OAUTH_CLIENT_SCOPE,
         }
     )
 
@@ -315,12 +342,86 @@ async def _create_admin_and_flip_latch(
     return api_key, service_api_key, client_id, client_secret, user_id
 
 
+async def upgrade_existing_oauth_clients(pool) -> None:
+    """Idempotently bring pre-registered OAuth client rows up to the
+    current ``client_info`` shape.
+
+    Runs on every API startup (from :func:`ensure_admin_user`) regardless
+    of the ``first_run_complete`` latch. A row written by an older build
+    may be missing:
+
+    - the Claude-Desktop loopback redirect (``_CLAUDE_DESKTOP_LOOPBACK_REDIRECT_URI``)
+    - the ``scope`` field (``_OAUTH_CLIENT_SCOPE``)
+
+    We upgrade in place — never drop existing redirect_uris, never
+    duplicate a row. Uses jsonb operators (``jsonb_set`` +
+    ``array_append``) so concurrent boots can't race on a stale read.
+
+    Safe to run every startup: the WHERE clause filters to rows that
+    actually need an upgrade, so steady-state is a cheap no-op SELECT
+    returning zero rows.
+    """
+    try:
+        async with pool.connection() as conn:
+            # Merge in the loopback redirect if missing. We use a jsonb
+            # containment check to avoid string-matching against the
+            # array element's quoting — `redirect_uris ? <uri>` is true
+            # iff the array contains that exact element.
+            await conn.execute(
+                """
+                UPDATE oauth_clients
+                SET client_info = jsonb_set(
+                    client_info,
+                    '{redirect_uris}',
+                    (client_info->'redirect_uris') || to_jsonb(%s::text),
+                    true
+                )
+                WHERE NOT (client_info->'redirect_uris' ? %s)
+                """,
+                (
+                    _CLAUDE_DESKTOP_LOOPBACK_REDIRECT_URI,
+                    _CLAUDE_DESKTOP_LOOPBACK_REDIRECT_URI,
+                ),
+            )
+
+            # Set the scope if absent. `jsonb_set` with create_missing=true
+            # inserts the key; when it's already present we leave the
+            # existing value alone (the WHERE clause filters to rows
+            # without the key).
+            await conn.execute(
+                """
+                UPDATE oauth_clients
+                SET client_info = jsonb_set(
+                    client_info,
+                    '{scope}',
+                    to_jsonb(%s::text),
+                    true
+                )
+                WHERE NOT (client_info ? 'scope')
+                """,
+                (_OAUTH_CLIENT_SCOPE,),
+            )
+    except Exception as exc:
+        # Table may not exist on a fresh schema where migrations haven't
+        # applied yet (e.g. tests that skip 006_oauth_store.sql). Log
+        # and continue — the bootstrap INSERT path writes the correct
+        # shape from the start, so a skip here only affects upgrades.
+        logger.warning(
+            "OAuth client upgrade skipped: %s", exc,
+        )
+
+
 async def ensure_admin_user(pool) -> None:
     """Env-driven bootstrap — called from `main.py` lifespan on every startup.
 
     No-op unless `ADMIN_EMAIL` + `ADMIN_PASSWORD` are set. Respects the
     `brilliant_settings.first_run_complete` latch: subsequent boots log a
     skip message rather than attempting a second INSERT.
+
+    On every boot — latched or not — we also run
+    :func:`upgrade_existing_oauth_clients` so older client_info rows
+    gain the Claude-Desktop loopback redirect and ``scope`` field
+    without requiring a manual SQL patch.
 
     Args:
         pool: An open AsyncConnectionPool.
@@ -336,6 +437,10 @@ async def ensure_admin_user(pool) -> None:
             "ADMIN_EMAIL and/or ADMIN_PASSWORD not set. "
             "Skipping admin bootstrap — no default credentials will be used."
         )
+        # Still attempt the upgrade pass — an admin-less deploy (e.g.
+        # Render pre-/setup) can still have a latched row that needs
+        # its client_info refreshed after a code update.
+        await upgrade_existing_oauth_clients(pool)
         return
 
     # Cheap latch pre-check so restart boots don't log anything alarming.
@@ -347,6 +452,8 @@ async def ensure_admin_user(pool) -> None:
 
     if row is not None and row[0] is True:
         logger.info("Admin user already claimed — skipping bootstrap.")
+        # Latched path — still upgrade any legacy client_info in place.
+        await upgrade_existing_oauth_clients(pool)
         return
 
     key_was_generated = not admin_api_key

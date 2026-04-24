@@ -35,6 +35,19 @@ readonly LOG_FILE="./install.log"
 # curls `GET /credentials` after admin bootstrap and writes the six-field
 # block alongside the installer.
 readonly CREDENTIALS_FILE="./brilliant-credentials.txt"
+# Sprint 0045 T-0264.6 — Claude Desktop config snippet. Written on the
+# headless-with-admin path after `/credentials` succeeds: we curl
+# `/credentials/claude-desktop-snippet` with the same admin key and drop
+# the raw JSON body here for the operator to paste into
+# `~/Library/Application Support/Claude/claude_desktop_config.json`.
+# Non-fatal on failure — admin can recover the snippet via /credentials
+# in the browser.
+readonly CLAUDE_DESKTOP_SNIPPET_FILE="./claude-desktop-snippet.json"
+# The tilde is intentional — this string is printed verbatim in the install
+# banner so the operator sees the canonical path to paste into, not the
+# expanded absolute path (which would leak $HOME and differ per user).
+# shellcheck disable=SC2088
+readonly CLAUDE_DESKTOP_CONFIG_PATH="~/Library/Application Support/Claude/claude_desktop_config.json"
 readonly HEALTH_TIMEOUT_SECONDS=60
 readonly POLL_INTERVAL_SECONDS=2
 # Window for the post-health admin-bootstrap to flush credentials into the
@@ -55,6 +68,12 @@ ADMIN_PASSWORD_FROM_ARGV=0
 ADMIN_API_KEY=""
 POSTGRES_PASSWORD=""
 ANTHROPIC_API_KEY=""
+# Sprint 0045 T-0264.2 — installer-minted secrets. Both honor pre-set shell
+# values (flag or env) via the `${VAR:=default}` idiom in phase_randoms, so
+# re-running ./install.sh with either var already in the environment
+# preserves it instead of regenerating.
+OAUTH_HANDOFF_SECRET=""
+BRILLIANT_SERVICE_API_KEY=""
 FORCE=0
 NO_INSTALL_DOCKER=0
 DRY_RUN=0
@@ -407,6 +426,37 @@ RECOVER
   return 1
 }
 
+fetch_claude_desktop_snippet() {
+  # Sprint 0045 T-0264.6. Runs on the headless-with-admin path immediately
+  # after fetch_credentials_file so the admin key is still in ADMIN_API_KEY.
+  # Curls GET /credentials/claude-desktop-snippet (admin-gated, same auth
+  # contract as /credentials) and writes the raw JSON body to
+  # ./claude-desktop-snippet.json with mode 600.
+  #
+  # Non-fatal on any failure — admin can recover via the /credentials page
+  # in the browser. Prints a stderr warning on failure and returns non-zero
+  # so the caller can skip the success banner line.
+  local path="$CLAUDE_DESKTOP_SNIPPET_FILE"
+  local http_code
+  # shellcheck disable=SC2155 # curl failure is captured via the explicit -o file + http_code check below
+  http_code="$(curl -sS -o "$path" -w '%{http_code}' \
+      -H "Authorization: Bearer ${ADMIN_API_KEY}" \
+      -H "Accept: application/json" \
+      "${API_URL}/credentials/claude-desktop-snippet" 2>/dev/null || printf '000')"
+  if [ "$http_code" = "200" ]; then
+    chmod 600 "$path"
+    log "phase 8" "Claude Desktop snippet written to ${path} (mode 600)"
+    return 0
+  fi
+
+  # Failure: remove any partial body, print warning, continue.
+  rm -f "$path" 2>/dev/null || true
+  printf '[warn] could not fetch Claude Desktop snippet (HTTP %s). Recover via %s/credentials in the browser.\n' \
+    "$http_code" "$API_URL" >&2
+  log "phase 8" "WARN: /credentials/claude-desktop-snippet fetch failed (HTTP ${http_code})"
+  return 1
+}
+
 # ---------- preflight ----------
 
 require_bash4() {
@@ -457,6 +507,15 @@ phase_randoms() {
   if [ -n "$ADMIN_EMAIL" ]; then
     : "${ADMIN_API_KEY:=bkai_$(rand_hex 24)}"
   fi
+  # Sprint 0045 T-0264.2 — both secrets are required on every path, not just
+  # the headless-with-admin branch. OAUTH_HANDOFF_SECRET signs the /oauth/login
+  # short-lived handoff token (without it, /oauth/login returns 500 —
+  # api/routes/oauth.py:102). BRILLIANT_SERVICE_API_KEY is the mcp→api
+  # outbound bearer — without it httpx client-rejects the blank Authorization
+  # header. The `bkai_svc_` prefix is load-bearing: it matches how
+  # api_keys.key_prefix is indexed, which the service-key auth path keys on.
+  : "${OAUTH_HANDOFF_SECRET:=$(rand_hex 32)}"
+  : "${BRILLIANT_SERVICE_API_KEY:=bkai_svc_$(rand_hex 32)}"
 }
 
 # ---------- phase stubs (filled in by later tasks) ----------
@@ -644,6 +703,13 @@ phase_env() {
     set_env_var ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" "./.env"
   fi
 
+  # Sprint 0045 T-0264.2 — installer-minted secrets, written BEFORE
+  # `docker compose up -d` so compose resolves service env blocks with the
+  # values populated. Both are generated in phase_randoms with the
+  # `${VAR:=default}` idiom, so pre-set shell values are preserved.
+  set_env_var OAUTH_HANDOFF_SECRET      "$OAUTH_HANDOFF_SECRET"      "./.env"
+  set_env_var BRILLIANT_SERVICE_API_KEY "$BRILLIANT_SERVICE_API_KEY" "./.env"
+
   # Sprint 0043 T-0257 — thread chosen host ports + derived URLs into
   # `.env`. docker-compose.yml reads BRILLIANT_{DB,API,MCP}_PORT via
   # ${…:-default} so a clean install (no conflict) preserves the
@@ -722,8 +788,15 @@ phase_summary() {
 
   # Headless-with-admin writes the creds file BEFORE the banner so the
   # banner can reference its presence (or absence on the warning path).
+  # Sprint 0045 T-0264.6 — after the creds file, fetch the Claude Desktop
+  # config snippet with the same admin key so the banner's snippet-hint
+  # line can branch on success/failure.
+  local snippet_ok=0
   if [ "$mode" = "headless-with-admin" ]; then
     fetch_credentials_file || true
+    if fetch_claude_desktop_snippet; then
+      snippet_ok=1
+    fi
   fi
 
   cat <<BANNER
@@ -771,6 +844,17 @@ NEXT
            ${API_URL}/credentials > ${CREDENTIALS_FILE}
 
 NEXT
+      # Sprint 0045 T-0264.6 — one-line hint pointing the operator at the
+      # snippet file and the Claude Desktop config path. Only prints on
+      # successful fetch; the warning line on failure already went to stderr.
+      if [ "$snippet_ok" -eq 1 ]; then
+        cat <<SNIPPET
+  Claude Desktop snippet:
+    File:         ${CLAUDE_DESKTOP_SNIPPET_FILE} (mode 600)
+    Paste into:   ${CLAUDE_DESKTOP_CONFIG_PATH}
+
+SNIPPET
+      fi
       ;;
   esac
 
