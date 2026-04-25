@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tarfile
 import zipfile
 
@@ -22,6 +23,7 @@ from services.frontmatter import (
     parse_frontmatter,
 )
 from services import audit
+from services.audit import _app_role_to_pg_role
 from services.links import sync_entry_links
 from services.storage import get_storage
 from services.vault_walker import iter_archive_md, resolve_exclude_patterns
@@ -46,7 +48,7 @@ router = APIRouter(tags=["import"])
 # Regex to detect [[wiki-links]] in markdown content.
 # Captures up to the first | (display text) or # (heading anchor) or ]],
 # handling [[Note]], [[Note|display]], and [[Note#Heading]] formats.
-_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#\\]+)")
 
 # Regex for inline #tags in content (but not ## headings)
 _INLINE_TAG_RE = re.compile(r"(?:^|\s)#([a-zA-Z][\w-]*)", re.MULTILINE)
@@ -272,11 +274,27 @@ async def detect_collisions(
     return collisions
 
 
-async def _resolve_content_type(conn, meta: dict, filename: str, logical_path: str):
+async def _resolve_content_type(
+    conn,
+    meta: dict,
+    filename: str,
+    logical_path: str,
+    user: UserContext,
+):
     """Resolve content_type from frontmatter, registry, daily note pattern, or path inference.
 
     Returns (content_type, type_mapping_or_None, unrecognized_type_or_None).
     Accepts both `content_type` (preferred, #25) and the legacy `type` alias.
+
+    When frontmatter declares a type that is not in
+    `content_type_registry`, the type is auto-registered with
+    `is_active=false` inside a privilege-scoped savepoint
+    (`SET LOCAL ROLE kb_admin`) mirroring `api/services/audit.py::record`.
+    The declared type is then used verbatim on the entry — the registry
+    change is runtime-only (no migration) and admins promote the row via
+    an explicit `UPDATE ... SET is_active=true` grant. The raw type is
+    still returned in the `unrecognized_type` slot so callers can surface
+    it in `unrecognized_types` for admin review (spec 0046 / T-0272.2).
     """
     raw_type = meta.get("content_type", "") or meta.get("type", "")
     if isinstance(raw_type, list):
@@ -292,8 +310,55 @@ async def _resolve_content_type(conn, meta: dict, filename: str, logical_path: s
         if reg_row:
             canonical = reg_row[1] if reg_row[1] else reg_row[0]
             return canonical, (raw_type, canonical), None
-        else:
-            return infer_content_type(logical_path), None, raw_type
+
+        # Auto-register the unknown type as is_active=false. RLS grants
+        # INSERT on `content_type_registry` to `kb_admin` only, so we
+        # briefly elevate inside a SAVEPOINT and restore the caller's
+        # role before RELEASE — identical pattern to audit.record.
+        sp_name = f"sp_autoreg_{secrets.token_hex(6)}"
+        pg_role = _app_role_to_pg_role(user.role, user.source)
+        try:
+            await conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                await conn.execute("SET LOCAL ROLE kb_admin")
+                await conn.execute(
+                    """
+                    INSERT INTO content_type_registry (name, description, is_active)
+                    VALUES (%s, 'Auto-registered from vault import — promote via admin', false)
+                    ON CONFLICT (name) DO NOTHING
+                    """,
+                    (raw_type,),
+                )
+            finally:
+                # Restore caller's role before RELEASE so the outer
+                # transaction continues under the original role.
+                try:
+                    await conn.execute(f"SET LOCAL ROLE {pg_role}")
+                except Exception:  # pragma: no cover — defensive
+                    logger.exception(
+                        "_resolve_content_type: failed to restore role to %s",
+                        pg_role,
+                    )
+            await conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except Exception:
+            # Don't block the import — log + rollback the savepoint so the
+            # outer transaction remains valid. The declared type is still
+            # used on the entry; only the registry side-effect is lost.
+            logger.exception(
+                "_resolve_content_type: auto-register failed for %r — continuing",
+                raw_type,
+            )
+            try:
+                await conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                await conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:  # pragma: no cover — defensive
+                logger.exception(
+                    "_resolve_content_type: failed to rollback savepoint %s",
+                    sp_name,
+                )
+
+        # Use the declared type verbatim; still flag via unrecognized_types.
+        return raw_type, None, raw_type
     elif _DAILY_NOTE_RE.match(filename):
         return "daily", None, None
     else:
@@ -338,7 +403,7 @@ async def import_preview(
         for fd in parsed_files:
             try:
                 content_type, mapping, unrec = await _resolve_content_type(
-                    conn, fd["meta"], fd["filename"], fd["logical_path"]
+                    conn, fd["meta"], fd["filename"], fd["logical_path"], user
                 )
                 fd["content_type"] = content_type
                 if mapping:
@@ -431,6 +496,10 @@ async def _execute_import(
     errors: list[str] = []
     type_mappings: dict[str, str] = {}
     unrecognized_types: set[str] = set()
+    # Aggregate unresolved wikilink / internal-markdown targets across every
+    # file so the HTTP response can surface them (see T-0272.3). Set-dedup
+    # means a target referenced from many MOCs counts once.
+    all_unresolved: set[str] = set()
 
     # Whether this user goes through staging
     use_staging = user.role in ("commenter", "viewer") or user.key_type == "agent"
@@ -517,18 +586,20 @@ async def _execute_import(
                 created += 1  # count as processed
                 continue
 
-            # Resolve content_type (frontmatter governance wins over
-            # registry/inference when it already validated).
-            if "content_type" in governance:
-                content_type = governance["content_type"]
-            else:
-                content_type, mapping, unrec = await _resolve_content_type(
-                    conn, meta, file.filename, logical_path
-                )
-                if mapping:
-                    type_mappings[mapping[0]] = mapping[1]
-                if unrec:
-                    unrecognized_types.add(unrec)
+            # Resolve content_type unconditionally. `_resolve_content_type`
+            # handles the full spectrum: registry hit (known type, no side
+            # effect), registry miss with frontmatter-declared type
+            # (auto-register `is_active=false` + flag as unrecognized), and
+            # frontmatter-silent (fall back to path inference). Short-circuiting
+            # on `governance["content_type"]` skips the auto-register side
+            # effect and breaks `moc` round-tripping (spec 0046 AC #3).
+            content_type, mapping, unrec = await _resolve_content_type(
+                conn, meta, file.filename, logical_path, user
+            )
+            if mapping:
+                type_mappings[mapping[0]] = mapping[1]
+            if unrec:
+                unrecognized_types.add(unrec)
 
             # Sensitivity / department / summary come from frontmatter
             # when provided; otherwise fall back to existing defaults.
@@ -640,7 +711,7 @@ async def _execute_import(
     # INSERTs so cross-file references within this batch resolve correctly.
     for source_id, content in pending_links:
         try:
-            linked += await sync_entry_links(
+            batch_linked, batch_unresolved = await sync_entry_links(
                 conn,
                 source_id,
                 content,
@@ -649,6 +720,8 @@ async def _execute_import(
                 user.source,
                 import_batch_id=batch_id,
             )
+            linked += batch_linked
+            all_unresolved.update(batch_unresolved)
         except Exception as exc:
             errors.append(f"link {source_id}: {str(exc)}")
 
@@ -680,6 +753,10 @@ async def _execute_import(
         unrecognized_types=sorted(unrecognized_types),
         batch_id=batch_id,
         collisions_resolved=collisions_resolved,
+        unresolved_links=len(all_unresolved),
+        # Truncate the sample to 20 — a 1000-target list over HTTP is noisy
+        # and the per-entry INFO log keeps the full set available for ops.
+        unresolved_links_sample=sorted(all_unresolved)[:20],
     )
 
 

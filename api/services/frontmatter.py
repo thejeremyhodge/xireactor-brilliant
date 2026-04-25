@@ -39,21 +39,10 @@ VALID_SENSITIVITIES: frozenset = frozenset(
         "shared",
     }
 )
-VALID_CONTENT_TYPES: frozenset = frozenset(
-    {
-        "context",
-        "project",
-        "meeting",
-        "decision",
-        "intelligence",
-        "daily",
-        "resource",
-        "department",
-        "team",
-        "system",
-        "onboarding",
-    }
-)
+# NOTE: content_type is NOT whitelisted here. `content_type_registry` is the
+# sole authority (migration 016 dropped the CHECK constraint on
+# `entries.content_type`). Unknown types are auto-registered at import time
+# as `is_active=false` by `_resolve_content_type` in routes/import_files.py.
 
 
 # Frontmatter keys that map to first-class `entries` columns. Everything else
@@ -171,9 +160,11 @@ def extract_governance_fields(meta: dict) -> dict:
 
     Returns a dict with any of `sensitivity`, `content_type`, `department`,
     `summary` (each only present when the frontmatter supplied a usable
-    value). Values are validated against `VALID_SENSITIVITIES` /
-    `VALID_CONTENT_TYPES`; invalid values are dropped so the caller falls
-    back to the existing inference path.
+    value). `sensitivity` is still validated against `VALID_SENSITIVITIES`;
+    `content_type` passes through any non-empty string — the
+    `content_type_registry` table is the sole authority, and unknown types
+    are auto-registered downstream in `_resolve_content_type` (spec 0046 /
+    T-0272.2).
     """
     out: dict = {}
 
@@ -187,7 +178,7 @@ def extract_governance_fields(meta: dict) -> dict:
         ct_raw = meta.get("type")
     if isinstance(ct_raw, list):
         ct_raw = ct_raw[0] if ct_raw else None
-    if isinstance(ct_raw, str) and ct_raw.strip() in VALID_CONTENT_TYPES:
+    if isinstance(ct_raw, str) and ct_raw.strip():
         out["content_type"] = ct_raw.strip()
 
     dept = meta.get("department")

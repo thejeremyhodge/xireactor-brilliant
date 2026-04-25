@@ -6,20 +6,10 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-# Valid content types matching the DB CHECK constraint
-VALID_CONTENT_TYPES = {
-    "context",
-    "project",
-    "meeting",
-    "decision",
-    "intelligence",
-    "daily",
-    "resource",
-    "department",
-    "team",
-    "system",
-    "onboarding",
-}
+# NOTE: content_type is governed by `content_type_registry` at runtime
+# (migration 016 dropped the CHECK constraint on entries.content_type).
+# Unknown types are auto-registered as `is_active=false` by the import
+# path — see `api/routes/import_files.py::_resolve_content_type`.
 
 VALID_SENSITIVITIES = {
     "system",
@@ -287,6 +277,10 @@ class ImportSummary(BaseModel):
     errors: list[str]
     type_mappings: dict[str, str] = {}
     unrecognized_types: list[str] = []
+    # Number of distinct wikilink / internal-markdown targets the link
+    # resolver couldn't match (T-0272.3). Sample is capped client-side.
+    unresolved_links: int = 0
+    unresolved_links_sample: list[str] = []
 
 
 VALID_COLLISION_TYPES = {"path", "title", "content_hash"}
@@ -375,6 +369,12 @@ class ImportExecuteResponse(BaseModel):
     # so operators can reproduce / roll back from the stored bytes. Other
     # import paths leave this as ``None``.
     blob_id: str | None = None
+    # Count + sample of wikilink / internal-markdown targets the link resolver
+    # couldn't match (T-0272.3). Surfaces silent-unresolved bugs loudly in the
+    # import response instead of hiding them in server logs. Sample truncated
+    # server-side (currently 20 targets) — full set remains in INFO logs.
+    unresolved_links: int = 0
+    unresolved_links_sample: list[str] = []
 
 
 class RollbackResponse(BaseModel):

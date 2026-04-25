@@ -27,7 +27,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#\\]+)")
 # Capture the character preceding the `[` so we can reject image syntax
 # (`![alt](src)`). Group 1 is the leading char (or empty at string start),
 # group 2 is the link label, group 3 is the target.
@@ -62,12 +62,21 @@ async def sync_entry_links(
     user_id: str,
     source: str,
     import_batch_id: str | None = None,
-) -> int:
+) -> tuple[int, list[str]]:
     """Delete existing entry_links for `entry_id` then re-insert from `content`.
 
-    Returns the number of link rows written. Unresolved targets are skipped
-    silently (the read-time resolver will pass them through as literal text).
-    Idempotent: safe to call repeatedly with the same content.
+    Returns ``(linked, unresolved)`` — the number of link rows written and the
+    list of wikilink / internal-markdown targets the org-scoped DB lookup
+    didn't match. Unresolved targets are skipped silently at link-insert time
+    (the read-time resolver will pass them through as literal text), but we
+    return them so callers (notably the import pipeline) can surface the miss
+    in their HTTP response. Idempotent: safe to call repeatedly with the same
+    content.
+
+    The returned ``unresolved`` list is untrimmed — callers decide how many
+    samples to keep. A per-entry INFO log still fires at call time so
+    per-entry granularity is available for debugging even when the caller
+    discards the tuple.
 
     Operates on the caller's connection so it participates in the caller's
     transaction — partial failures roll back with the parent write.
@@ -82,7 +91,7 @@ async def sync_entry_links(
 
     # Cheap sniff: bail only when neither reference form can possibly match.
     if not content or ("[[" not in content and "](" not in content):
-        return 0
+        return 0, []
 
     wiki_targets = _WIKI_LINK_RE.findall(content)
     md_targets = [
@@ -91,7 +100,7 @@ async def sync_entry_links(
         if _is_internal_md_target(target)
     ]
     if not wiki_targets and not md_targets:
-        return 0
+        return 0, []
 
     # Dedup across both forms while preserving order. Wiki links scan first
     # (historical order) so a target referenced both ways resolves once.
@@ -165,4 +174,4 @@ async def sync_entry_links(
             ", ".join(unresolved[:10]),
         )
 
-    return linked
+    return linked, unresolved
