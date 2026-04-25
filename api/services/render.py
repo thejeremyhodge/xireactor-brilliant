@@ -8,9 +8,14 @@ resolver. See spec 0028.
 
 import re
 
-# Matches [[slug]] or [[slug|alias]]. The slug capture excludes ']' and '|'
-# so nested brackets / pipes stay unmatched and pass through unchanged.
-_WIKI_LINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]")
+# Matches [[slug]] or [[slug|alias]], including the Obsidian table-cell
+# escape form `[[slug\|alias]]` (a literal `\` is required inside table
+# cells to avoid the cell delimiter eating the alias pipe). The slug
+# stop class adds `\\` so `target-a\` doesn't bleed into the slug
+# capture; the optional `\\?` after the slug consumes the escape so the
+# alternation `(?:\|...)` can still match the alias pipe. Stop class
+# also excludes `]` and `|` so nested brackets / pipes pass through.
+_WIKI_LINK_RE = re.compile(r"\[\[([^\]|\\]+?)\\?(?:\|([^\]]+))?\]\]")
 
 
 async def resolve_wiki_links(content: str, conn, source_entry_id: str) -> str:
