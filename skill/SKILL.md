@@ -1,5 +1,5 @@
 ---
-name: knowledge-base
+name: brilliant-kb-assistant
 description: xiReactor Brilliant Knowledge Base assistant — manages sessions, daily notes, content routing, search, browsing, governance, and meeting intelligence via MCP. Use when the user asks about organizational knowledge, needs to look something up, wants to create or update KB content, says "resume", "compress", "daily", "search", or when you need institutional context.
 ---
 
