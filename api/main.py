@@ -73,12 +73,31 @@ async def _publish_public_url_to_db(pool) -> None:
         )
 
 
+def _log_ready_banner() -> None:
+    """Emit an unmistakable "ready" marker for operators watching Render logs.
+
+    A fresh Render deploy can take ~3-4 min from "deploy started" to "edge
+    routing live". Without an explicit marker, a non-technical operator
+    watching the log stream has no signal for when it's safe to click the
+    setup link. This banner is the signal: when this line scrolls past,
+    open the URL.
+    """
+    public_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    setup_url = f"{public_url}/setup" if public_url else "http://localhost:8010/setup"
+    bar = "=" * 64
+    logger.info(bar)
+    logger.info("  YOUR BRILLIANT SYSTEM IS COMPLETELY READY NOW")
+    logger.info("  Open: %s", setup_url)
+    logger.info(bar)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage connection pool lifecycle and run startup bootstrap."""
     await init_pool()
     await _publish_public_url_to_db(get_pool())
     await ensure_admin_user(get_pool())
+    _log_ready_banner()
     yield
     await close_pool()
 
