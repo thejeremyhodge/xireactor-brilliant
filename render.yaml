@@ -42,13 +42,16 @@ services:
     name: brilliant-api
     runtime: docker
     plan: starter
-    region: oregon
+    region: virginia
     dockerfilePath: ./api/Dockerfile
     dockerContext: .
     # Override the Dockerfile CMD to drop `--reload` in production.
     # Render's Docker runtime uses `dockerCommand` (not `startCommand`,
-    # which is native-runtime only). `sh -c` so $PORT expands at runtime.
-    dockerCommand: sh -c "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    # which is native-runtime only). Hardcode port 8000 to match the
+    # PORT env var below — Render preserves literal double quotes from
+    # YAML into argv, so `sh -c "$PORT"` forms get executed as a single
+    # quoted command name and fail with "not found".
+    dockerCommand: uvicorn main:app --host 0.0.0.0 --port 8000
     # Runs before every deploy (Render executes this inside the built
     # image against the live DB). Idempotent migrations 001..NNN.
     preDeployCommand: python tools/render_migrate.py
@@ -131,7 +134,7 @@ services:
     name: brilliant-mcp
     runtime: docker
     plan: starter
-    region: oregon
+    region: virginia
     dockerfilePath: ./mcp/Dockerfile
     dockerContext: ./mcp
     # Dockerfile CMD `python remote_server.py` is fine for production —
