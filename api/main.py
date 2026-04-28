@@ -4,7 +4,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -110,6 +110,19 @@ app.add_middleware(RequestLogMiddleware)
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.head("/")
+async def root_head():
+    """Lightweight HEAD / for Render's edge health probe.
+
+    Render's port-detection probe hits HEAD / repeatedly during the
+    "service is live → port detected" handoff. Without this handler,
+    FastAPI returns 405 Method Not Allowed and Render's edge can take
+    minutes to finalize routing (5min gap observed on 2026-04-28 deploy).
+    Mirrors the fix already applied to the MCP service (commit 5772ea3).
+    """
+    return Response(status_code=200)
 
 
 @app.get("/")
