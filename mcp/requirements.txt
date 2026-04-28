@@ -1,3 +1,8 @@
-mcp[cli]>=1.27
+mcp[cli]>=1.27,<2
+# Pin pre-1.0 starlette: streamable HTTP MCP transport regresses on
+# starlette 1.0.0 (2026-03-22 release). Symptom: server returns 200 OK
+# on POST + GET /mcp; client receives no usable SSE stream.
+starlette<1.0
+uvicorn<0.46
 httpx>=0.27
 psycopg[binary]>=3.1
