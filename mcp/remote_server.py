@@ -162,7 +162,9 @@ class _BasicAuthTokenBodyBridge:
 # Configuration
 # ---------------------------------------------------------------------------
 
-MCP_PORT = int(os.environ.get("MCP_PORT", "8001"))
+# Render injects $PORT and expects the service to bind it; MCP_PORT is kept
+# for compose / local-dev (and as the ultimate fallback). PORT wins on Render.
+MCP_PORT = int(os.environ.get("PORT") or os.environ.get("MCP_PORT", "8001"))
 _RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
 _MCP_BASE_URL_RAW = os.environ.get("MCP_BASE_URL", "").strip()
 
