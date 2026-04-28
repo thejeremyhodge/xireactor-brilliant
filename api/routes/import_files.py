@@ -1445,7 +1445,34 @@ def _render_vault_upload_page() -> str:
               "<code>rollback_import(batch_id=\\"" + escapeHtml(p.batch_id) +
               "\\")</code> from Claude, or " +
               "<code>DELETE /import/" + escapeHtml(p.batch_id) + "</code>.";
+            html +=
+              "<br><br><a href=\\"#\\" id=\\"see-3d\\" " +
+              "style=\\"color:#7e88ff;font-size:13px;text-decoration:none;\\">" +
+              "✨ See it in 3D</a>";
             renderPanel("ok", html);
+            var see3dLink = document.getElementById("see-3d");
+            if (see3dLink) {{
+              see3dLink.addEventListener("click", function (ev) {{
+                ev.preventDefault();
+                var apiKey = null;
+                try {{ apiKey = window.localStorage.getItem(STORAGE_KEY); }} catch (e) {{}}
+                if (!apiKey) {{
+                  alert("Graph not ready. Refresh in 30 seconds.");
+                  return;
+                }}
+                fetch("/import/visualize", {{
+                  headers: {{ "Authorization": "Bearer " + apiKey }}
+                }}).then(function (r) {{
+                  if (!r.ok) throw new Error("not ready");
+                  return r.text();
+                }}).then(function (htmlText) {{
+                  var blob = new Blob([htmlText], {{ type: "text/html" }});
+                  window.open(URL.createObjectURL(blob), "_blank");
+                }}).catch(function () {{
+                  alert("Graph not ready. Refresh in 30 seconds.");
+                }});
+              }});
+            }}
           }} else {{
             var detail = null;
             if (res.payload && res.payload.detail !== undefined) {{
@@ -1516,6 +1543,160 @@ async def vault_upload_page() -> HTMLResponse:
     unauthenticated so the page can render the paste-your-key fallback.
     """
     return HTMLResponse(_render_vault_upload_page())
+
+
+# ---------------------------------------------------------------------------
+# GET /import/visualize — 3D KB preview Easter egg (V2 demo, Sprint 0047)
+# ---------------------------------------------------------------------------
+#
+# Returns a self-contained branded HTML page rendering the caller's whole-org
+# graph using the frontend-supplied template at api/templates/kb_graph_3d.html.
+# Caps: 3000 nodes / 4000 edges. Empty or any error → friendly NOT-READY card.
+
+_VIZ_NODE_CAP = 3000
+_VIZ_EDGE_CAP = 4000
+
+_VIZ_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "templates",
+    "kb_graph_3d.html",
+)
+with open(_VIZ_TEMPLATE_PATH, encoding="utf-8") as _fh:
+    _KB_GRAPH_TEMPLATE = _fh.read()
+
+_VIZ_CARD_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>xiReactor / Brilliant — Knowledge Graph</title>
+<style>
+  body {{ margin:0; min-height:100vh; background:#0a0c14; color:#e8eaf2;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display:flex; align-items:center; justify-content:center; }}
+  .card {{ max-width:480px; padding:32px; text-align:center; }}
+  .brand {{ font-weight:600; letter-spacing:0.04em; color:#7e88ff;
+    font-size:13px; text-transform:uppercase; margin-bottom:16px; }}
+  h1 {{ font-size:24px; margin:0 0 12px; font-weight:600; }}
+  p  {{ margin:0 0 8px; color:#aab0c5; }}
+  .footer {{ position:fixed; bottom:18px; left:0; right:0; text-align:center;
+    font-size:12px; color:#5a6280; }}
+</style></head><body>
+<div class="card">
+  <div class="brand">xiReactor / Brilliant — Knowledge Graph</div>
+  <h1>{title}</h1>
+  <p>{hint}</p>
+</div>
+<div class="footer">xireactor.com/brilliant</div>
+</body></html>"""
+
+
+def _viz_card(title: str, hint: str) -> str:
+    return _VIZ_CARD_HTML.format(title=title, hint=hint)
+
+
+@router.get("/visualize", response_class=HTMLResponse)
+async def visualize_graph(
+    user: UserContext = Depends(get_current_user),
+) -> HTMLResponse:
+    """Render the caller's KB as a self-contained 3D-graph HTML page.
+
+    Bearer api_key required (handled by ``get_current_user``). On the happy
+    path, the frontend-supplied template at ``api/templates/kb_graph_3d.html``
+    is loaded once at module import and the single ``__GRAPH_DATA_JSON__``
+    placeholder is replaced with compact JSON of the graph payload.
+
+    Caps: 3000 nodes / 4000 edges. Above that → branded "exceeds demo
+    limits" card; the heavy template is never invoked. Empty (0 nodes) or
+    any internal error → branded "Graph not ready. Refresh in 30 seconds."
+    card. Errors are logged but never bubbled.
+    """
+    try:
+        async with get_db(user) as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM entries WHERE status != 'archived'"
+            )
+            total_nodes = int((await cur.fetchone())[0])
+
+            if total_nodes == 0:
+                return HTMLResponse(
+                    _viz_card("Graph not ready.", "Refresh in 30 seconds.")
+                )
+
+            if total_nodes > _VIZ_NODE_CAP:
+                return HTMLResponse(
+                    _viz_card(
+                        "Wow, you have a large knowledge base.",
+                        "This exceeds the demo visualization limits.",
+                    )
+                )
+
+            cur = await conn.execute(
+                """
+                SELECT id, title, content_type
+                FROM entries
+                WHERE status != 'archived'
+                ORDER BY updated_at DESC
+                """
+            )
+            cur.row_factory = dict_row
+            node_rows = await cur.fetchall()
+            node_ids = [str(r["id"]) for r in node_rows]
+
+            cur = await conn.execute(
+                """
+                SELECT source_entry_id, target_entry_id, link_type
+                FROM entry_links
+                WHERE source_entry_id = ANY(%s)
+                  AND target_entry_id = ANY(%s)
+                """,
+                (node_ids, node_ids),
+            )
+            cur.row_factory = dict_row
+            edge_rows = await cur.fetchall()
+    except Exception:
+        logger.exception("visualize_graph: graph fetch failed")
+        return HTMLResponse(
+            _viz_card("Graph not ready.", "Refresh in 30 seconds.")
+        )
+
+    # Server-side dedup, canonical (min, max, link_type) — mirrors /graph.
+    edge_keys: set[tuple[str, str, str]] = set()
+    edges: list[dict] = []
+    for r in edge_rows:
+        a = str(r["source_entry_id"])
+        b = str(r["target_entry_id"])
+        lo, hi = (a, b) if a <= b else (b, a)
+        key = (lo, hi, r["link_type"])
+        if key in edge_keys:
+            continue
+        edge_keys.add(key)
+        edges.append({"source": lo, "target": hi, "link_type": r["link_type"]})
+
+    if len(edges) > _VIZ_EDGE_CAP:
+        return HTMLResponse(
+            _viz_card(
+                "Wow, you have a large knowledge base.",
+                "This exceeds the demo visualization limits.",
+            )
+        )
+
+    graph_data = {
+        "nodes": [
+            {
+                "id": str(r["id"]),
+                "title": r["title"],
+                "content_type": r["content_type"],
+            }
+            for r in node_rows
+        ],
+        "edges": edges,
+        "truncated": False,
+        "total_nodes": total_nodes,
+    }
+    rendered = _KB_GRAPH_TEMPLATE.replace(
+        "__GRAPH_DATA_JSON__",
+        json.dumps(graph_data, separators=(",", ":")),
+    )
+    return HTMLResponse(rendered)
 
 
 # ---------------------------------------------------------------------------
