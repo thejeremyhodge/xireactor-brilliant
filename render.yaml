@@ -30,6 +30,7 @@ databases:
   - name: brilliant-db
     plan: basic-256mb
     databaseName: brilliant
+    region: virginia
     # user omitted — Render auto-generates the DB user; `postgres` is reserved
     # and rejected by Blueprint validation. DATABASE_URL still resolves via
     # `fromDatabase.property: connectionString` below.
