@@ -1,7 +1,10 @@
 mcp[cli]>=1.27,<2
-# Pin pre-1.0 starlette: streamable HTTP MCP transport regresses on
-# starlette 1.0.0 (2026-03-22 release). Symptom: server returns 200 OK
-# on POST + GET /mcp; client receives no usable SSE stream.
+# Pin pre-3.4 sse-starlette: streamable HTTP MCP transport regresses on
+# sse-starlette 3.4.1 (released 2026-04-26). Symptom: server returns
+# 200 OK on POST + GET /mcp; client receives no usable SSE stream.
+sse-starlette<3.4
+# Pin pre-1.0 starlette + pre-0.46 uvicorn as belt-and-braces — the
+# same fresh-install resolved both alongside sse-starlette 3.4.1.
 starlette<1.0
 uvicorn<0.46
 httpx>=0.27
