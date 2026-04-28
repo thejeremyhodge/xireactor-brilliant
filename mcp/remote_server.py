@@ -672,6 +672,15 @@ mcp.settings.debug = False
 # fresh /oauth/login POST, which re-computes the sig anyway.
 
 
+@mcp.custom_route("/", methods=["GET", "HEAD"])
+async def _root_health(request: Request) -> Response:
+    # Render's port-detector + continuous health probe issues HEAD /. Without
+    # a handler here FastMCP's streamable_http_app returns 404, which Render
+    # treats as unhealthy and tears the container down ~60s after going live
+    # (no auto-restart). 200 OK keeps the deploy healthy.
+    return PlainTextResponse("ok")
+
+
 @mcp.custom_route("/oauth/continue", methods=["GET"])
 async def _oauth_continue(request: Request) -> Response:
     tx = (request.query_params.get("tx") or "").strip()
