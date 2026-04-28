@@ -45,13 +45,13 @@ services:
     region: virginia
     dockerfilePath: ./api/Dockerfile
     dockerContext: .
-    # Override the Dockerfile CMD to drop `--reload` in production.
-    # Render's Docker runtime uses `dockerCommand` (not `startCommand`,
-    # which is native-runtime only). Hardcode port 8000 to match the
-    # PORT env var below — Render preserves literal double quotes from
-    # YAML into argv, so `sh -c "$PORT"` forms get executed as a single
-    # quoted command name and fail with "not found".
-    dockerCommand: uvicorn main:app --host 0.0.0.0 --port 8000
+    # NO `dockerCommand:` — Render's parser wraps the value in literal
+    # quotes and passes it through `sh -c '"<value>"'`, which sh treats
+    # as a single quoted command name and fails with `sh: 1: <value>: not
+    # found` (exit 127). Both the `sh -c "..."` form and the bare form
+    # hit this. The Dockerfile CMD is production-ready exec-form (no
+    # --reload), so we let it run as-is. Local dev keeps --reload via
+    # `command:` override in docker-compose.yml.
     # Runs before every deploy (Render executes this inside the built
     # image against the live DB). Idempotent migrations 001..NNN.
     preDeployCommand: python tools/render_migrate.py
