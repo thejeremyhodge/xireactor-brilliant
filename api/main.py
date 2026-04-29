@@ -85,10 +85,13 @@ def _log_ready_banner() -> None:
     public_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
     setup_url = f"{public_url}/setup" if public_url else "http://localhost:8010/setup"
     bar = "=" * 64
-    logger.info(bar)
-    logger.info("  YOUR BRILLIANT SYSTEM IS COMPLETELY READY NOW")
-    logger.info("  Open: %s", setup_url)
-    logger.info(bar)
+    # WARNING level (not INFO) so the banner survives the default
+    # logger threshold — `brilliant.api` has no handler/level config,
+    # so info() falls through Python's lastResort and gets dropped.
+    logger.warning(bar)
+    logger.warning("  YOUR BRILLIANT SYSTEM IS COMPLETELY READY NOW")
+    logger.warning("  Open: %s", setup_url)
+    logger.warning(bar)
 
 
 @asynccontextmanager
