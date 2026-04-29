@@ -217,6 +217,23 @@ def _render_login(tx: str, email: str = "", error: str | None = None) -> str:
       <button type="submit">Sign in &amp; authorize</button>
     </div>
   </form>
+  <script>
+    (function () {{
+      var form = document.querySelector('form[action="/oauth/login"]');
+      if (!form) return;
+      form.addEventListener('submit', function (e) {{
+        var btn = form.querySelector('button[type=submit]');
+        if (!btn) return;
+        if (btn.getAttribute('aria-busy') === 'true') {{
+          e.preventDefault();
+          return;
+        }}
+        btn.setAttribute('aria-busy', 'true');
+        btn.disabled = true;
+        btn.textContent = 'Signing in';
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """

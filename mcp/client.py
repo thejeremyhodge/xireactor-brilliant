@@ -22,26 +22,35 @@ import httpx
 def _resolve_api_base_url() -> str:
     """Resolve the API's outbound-callable base URL (mcp → api tool calls).
 
-    Env-only resolution (T-0264.4, Sprint 0045):
+    Resolution order:
 
-    1. ``BRILLIANT_BASE_URL`` — the canonical outbound URL. Compose sets
-       this to ``http://api:8000`` (service-network address); ``render.yaml``
-       wires it via ``fromService.property:host`` (internal service name).
-       On Render this is bare; we prepend ``https://`` if no scheme is
-       present.
-    2. ``http://localhost:8010`` — last-resort default for local-dev /
-       debug runs without compose.
+    1. ``BRILLIANT_API_HOST`` + ``BRILLIANT_API_PORT`` — the Render path.
+       render.yaml wires both via ``fromService`` against the API service
+       (``property: host`` and ``property: port``), so the URL stays
+       generic across forks/renames. Render's inter-service mesh is plain
+       HTTP (no internal TLS termination), so we always assemble
+       ``http://<host>:<port>``.
+    2. ``BRILLIANT_BASE_URL`` — explicit full URL for compose / local-dev
+       (e.g. ``http://api:8000``). Bare values (no scheme) are treated as
+       ``http://<value>`` — *not* https://, since prepending https against
+       a plain-HTTP internal endpoint silently fails ("All connection
+       attempts failed").
+    3. ``http://localhost:8010`` — last-resort default for ad-hoc runs.
 
-    DB read of ``brilliant_settings.api_public_url`` was removed. That
-    column is semantically the *browser-visible* URL (used by
-    ``mcp/remote_server.py::_resolve_api_public_url`` to build OAuth
+    DB read of ``brilliant_settings.api_public_url`` was removed in
+    T-0264.4. That column is semantically the *browser-visible* URL (used
+    by ``mcp/remote_server.py::_resolve_api_public_url`` to build OAuth
     redirects); reading it for outbound poisoned mcp→api calls any time
-    an operator set it for OAuth reasons. See ST-0209 / demo4 incident
-    for the exact failure this guards against.
+    an operator set it for OAuth reasons. See ST-0209 / demo4 incident.
     """
+    host = os.environ.get("BRILLIANT_API_HOST", "").strip()
+    port = os.environ.get("BRILLIANT_API_PORT", "").strip()
+    if host and port:
+        return f"http://{host}:{port}".rstrip("/")
+
     raw = os.environ.get("BRILLIANT_BASE_URL", "http://localhost:8010").strip()
     if raw and not raw.startswith(("http://", "https://")):
-        raw = f"https://{raw}"
+        raw = f"http://{raw}"
     return raw.rstrip("/")
 
 

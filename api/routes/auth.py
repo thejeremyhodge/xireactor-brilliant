@@ -75,6 +75,17 @@ def _render_login_form(email: str = "", error: str | None = None) -> str:
   button {{ padding: 10px 14px; font-size: 1rem; background: #111; color: #fff;
             border: 0; border-radius: 6px; cursor: pointer; }}
   button:hover {{ background: #333; }}
+  button:disabled, button[aria-busy="true"] {{
+    opacity: 0.75; cursor: wait; background: #333;
+  }}
+  button[aria-busy="true"]::after {{
+    content: ""; display: inline-block; width: 10px; height: 10px;
+    margin-left: 8px; vertical-align: -1px;
+    border: 2px solid rgba(255,255,255,0.4);
+    border-top-color: #fff; border-radius: 50%;
+    animation: brilliant-spin 0.7s linear infinite;
+  }}
+  @keyframes brilliant-spin {{ to {{ transform: rotate(360deg); }} }}
   .error {{ background: #fdecec; color: #8a1f1f; padding: 10px 12px;
             border-radius: 6px; border: 1px solid #f5b5b5; }}
   .warn {{ background: #fff8e1; border: 1px solid #f0d878; color: #6b5200;
@@ -100,6 +111,23 @@ def _render_login_form(email: str = "", error: str | None = None) -> str:
     </label>
     <button type="submit">Sign in &amp; rotate key</button>
   </form>
+  <script>
+    (function () {{
+      var form = document.querySelector('form[action="/auth/login"]');
+      if (!form) return;
+      form.addEventListener('submit', function (e) {{
+        var btn = form.querySelector('button[type=submit]');
+        if (!btn) return;
+        if (btn.getAttribute('aria-busy') === 'true') {{
+          e.preventDefault();
+          return;
+        }}
+        btn.setAttribute('aria-busy', 'true');
+        btn.disabled = true;
+        btn.textContent = 'Signing in';
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """

@@ -37,6 +37,11 @@ services:
       context: .
       dockerfile: ./api/Dockerfile
     # No `container_name:` — see db service comment (T-0259).
+    # `command:` override adds --reload for local dev (the ./api:/app
+    # bind mount below makes hot-reload meaningful). Dockerfile CMD is
+    # kept production-clean for Render so we don't have to fight
+    # Render's dockerCommand quote-parsing bug.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
       db:
         condition: service_healthy

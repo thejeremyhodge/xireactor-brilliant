@@ -30,6 +30,7 @@ databases:
   - name: brilliant-db
     plan: basic-256mb
     databaseName: brilliant
+    region: virginia
     # user omitted — Render auto-generates the DB user; `postgres` is reserved
     # and rejected by Blueprint validation. DATABASE_URL still resolves via
     # `fromDatabase.property: connectionString` below.
@@ -42,21 +43,33 @@ services:
     name: brilliant-api
     runtime: docker
     plan: starter
-    region: oregon
+    region: virginia
     dockerfilePath: ./api/Dockerfile
     dockerContext: .
-    # Override the Dockerfile CMD to drop `--reload` in production.
-    # Render's Docker runtime uses `dockerCommand` (not `startCommand`,
-    # which is native-runtime only).
-    dockerCommand: uvicorn main:app --host 0.0.0.0 --port 8000
+    # NO `dockerCommand:` — Render's parser wraps the value in literal
+    # quotes and passes it through `sh -c '"<value>"'`, which sh treats
+    # as a single quoted command name and fails with `sh: 1: <value>: not
+    # found` (exit 127). Both the `sh -c "..."` form and the bare form
+    # hit this. The Dockerfile CMD is production-ready exec-form (no
+    # --reload), so we let it run as-is. Local dev keeps --reload via
+    # `command:` override in docker-compose.yml.
     # Runs before every deploy (Render executes this inside the built
-    # image against the live DB). Idempotent migrations 001..027.
+    # image against the live DB). Idempotent migrations 001..NNN.
     preDeployCommand: python tools/render_migrate.py
     disk:
       name: brilliant-data
       mountPath: /data
       sizeGB: 1
     envVars:
+      # --- Port ---
+      # Tell Render the port up front so its port-detector doesn't loop
+      # ("New primary port detected. Restarting deploy to update network
+      # configuration...") when the service binds something other than
+      # Render's default ($PORT=10000). dockerCommand binds $PORT, so the
+      # service binds whatever this value is.
+      - key: PORT
+        value: "8000"
+
       # --- Database ---
       - key: DATABASE_URL
         fromDatabase:
@@ -122,36 +135,60 @@ services:
     name: brilliant-mcp
     runtime: docker
     plan: starter
-    region: oregon
+    region: virginia
     dockerfilePath: ./mcp/Dockerfile
     dockerContext: ./mcp
-    # Dockerfile CMD `python remote_server.py` is fine for production.
+    # Dockerfile CMD `python remote_server.py` is fine for production —
+    # remote_server.py reads PORT (set below) and binds it.
+    #
+    # Pre-deploy: block until the API's preDeployCommand (render_migrate.py)
+    # has finished applying the schema. We poll for the kb_admin role; once
+    # 004_rls.sql has run, the catalog is populated and every later migration
+    # has run too (render_migrate.py applies in order, transactionally per
+    # file). Without this, the MCP container can boot before the API has
+    # finished migrating a fresh DB and `_publish_public_url_to_db()` fails
+    # with `role "kb_admin" does not exist`.
+    preDeployCommand: python wait_for_api_migrations.py
     envVars:
+      # --- Port ---
+      # Same rationale as brilliant-api above: Render's port-detector loops
+      # when the bound port disagrees with $PORT. remote_server.py reads
+      # PORT first, MCP_PORT second, default 8001.
+      - key: PORT
+        value: "8001"
+
       # --- Database (for OAuth store + session logs) ---
       - key: DATABASE_URL
         fromDatabase:
           name: brilliant-db
           property: connectionString
 
-      # --- API base URL (internal-to-Render service-discovery name) ---
-      # Render returns the internal service name (e.g. "brilliant-api") here,
-      # NOT the public FQDN. mcp/client.py prepends `https://` when building
-      # the outbound URL — internal-network resolution on Render maps the
-      # bare name to the service. If you ever need a public URL here, the
-      # same RENDER_EXTERNAL_URL + DB-publish pattern used for the MCP URL
-      # (migration 029) is the way.
-      - key: BRILLIANT_BASE_URL
+      # --- API outbound URL (internal Render network) ---
+      # Render's inter-service mesh does NOT TLS-terminate on internal hops
+      # (TLS is only at the public LB), so the MCP must call the API over
+      # plain HTTP at the service's internal hostname:port. We pull both
+      # pieces via `fromService` so this stays generic — an operator forking
+      # the Blueprint and renaming the API service only updates the `name:`
+      # reference; host/port resolve at deploy time.
+      #
+      # mcp/client.py composes `http://${BRILLIANT_API_HOST}:${BRILLIANT_API_PORT}`
+      # when both are set; falls back to BRILLIANT_BASE_URL for compose / dev.
+      - key: BRILLIANT_API_HOST
         fromService:
           type: web
           name: brilliant-api
           property: host
+      - key: BRILLIANT_API_PORT
+        fromService:
+          type: web
+          name: brilliant-api
+          property: port
 
-      # --- MCP self-URL ---
-      # MCP_PORT must match what Render binds; remote_server.py reads
-      # MCP_BASE_URL from its own $RENDER_EXTERNAL_URL at boot if unset.
-      # We still export MCP_BASE_URL using the self-hostname for clarity.
-      - key: MCP_PORT
-        value: "8001"
+      # --- MCP self-URL fallback ---
+      # remote_server.py prefers $RENDER_EXTERNAL_URL (Render auto-injects
+      # this on every web service); MCP_BASE_URL is the explicit override
+      # for compose / manual deploys. fromService here yields the bare
+      # internal service name only — kept as a tag, not a URL.
       - key: MCP_BASE_URL
         fromService:
           type: web

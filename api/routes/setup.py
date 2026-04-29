@@ -216,7 +216,7 @@ _BRAND_LOGO_SVG = """<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/sv
 
 _BRAND_TITLE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 72" role="img" aria-label="xiReactor / Brilliant" class="brand-title">
   <text x="260" y="54" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="56" font-weight="700" letter-spacing="-1.2">
-    <tspan fill="#4558c9">xi</tspan><tspan fill="#1f2328">Reactor / </tspan><tspan fill="#4558c9">Brilliant</tspan>
+    <tspan fill="#4558c9">xi</tspan><tspan fill="currentColor">Reactor / </tspan><tspan fill="#4558c9">Brilliant</tspan>
   </text>
 </svg>"""
 
@@ -251,6 +251,17 @@ _BASE_STYLE = """
   button { padding: 10px 14px; font-size: 1rem; background: #111; color: #fff;
            border: 0; border-radius: 6px; cursor: pointer; margin-right: 8px; }
   button:hover { background: #333; }
+  button:disabled, button[aria-busy="true"] {
+    opacity: 0.75; cursor: wait; background: #333;
+  }
+  button[aria-busy="true"]::after {
+    content: ""; display: inline-block; width: 10px; height: 10px;
+    margin-left: 8px; vertical-align: -1px;
+    border: 2px solid rgba(255,255,255,0.4);
+    border-top-color: #fff; border-radius: 50%;
+    animation: brilliant-spin 0.7s linear infinite;
+  }
+  @keyframes brilliant-spin { to { transform: rotate(360deg); } }
   button.secondary { background: #fff; color: #111; border: 1px solid #111; }
   a.button { display: inline-block; padding: 10px 14px; font-size: 1rem;
              background: #111; color: #fff; border: 0; border-radius: 6px;
@@ -277,7 +288,8 @@ _BASE_STYLE = """
   .brand-mark { display: flex; align-items: center; justify-content: center;
                 gap: 14px; margin-bottom: 8px; }
   .brand-logo { width: 56px; height: 56px; flex: 0 0 auto; }
-  .brand-title { height: 42px; width: auto; flex: 0 1 auto; max-width: 360px; }
+  .brand-title { height: 42px; width: auto; flex: 0 1 auto; max-width: 360px;
+                 color: #1f2328; }
   .brand-tagline { color: #555; font-size: 0.95rem; margin: 0; }
 
   /* Pulsing blue CTA for the credentials-download button. The CTA pulses
@@ -358,6 +370,23 @@ def _render_setup_form(
       <button type="submit">Create my admin account</button>
     </div>
   </form>
+  <script>
+    (function () {{
+      var form = document.querySelector('form[action="/setup"]');
+      if (!form) return;
+      form.addEventListener('submit', function (e) {{
+        var btn = form.querySelector('button[type=submit]');
+        if (!btn) return;
+        if (btn.getAttribute('aria-busy') === 'true') {{
+          e.preventDefault();
+          return;
+        }}
+        btn.setAttribute('aria-busy', 'true');
+        btn.disabled = true;
+        btn.textContent = 'Creating account';
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """

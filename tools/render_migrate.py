@@ -43,6 +43,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import psycopg
@@ -87,6 +88,42 @@ def _migration_number(filename: str) -> int:
     return int(m.group(1)) if m else -1
 
 
+def _wait_for_db(dsn: str, timeout_s: int = 120, retry_delay_s: int = 3) -> None:
+    """Block until the DB accepts connections, or raise after timeout_s.
+
+    Render Blueprint deploys do not strictly order brilliant-db ready
+    before brilliant-api's preDeployCommand fires — a fresh Blueprint
+    sync can hit this script while the DB is still warming up. Without
+    a wait, the first deploy always fails with `Connection refused`
+    and Render auto-retries ~30s later. The visible "exited with
+    status 1" phase is awkward during demos.
+    """
+    deadline = time.time() + timeout_s
+    attempt = 0
+    last_exc: Exception | None = None
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            with psycopg.connect(dsn, connect_timeout=5) as conn:
+                conn.close()
+            if attempt > 1:
+                print(f"DB ready after {attempt} attempts.", file=sys.stderr)
+            return
+        except psycopg.OperationalError as exc:
+            last_exc = exc
+            remaining = int(deadline - time.time())
+            print(
+                f"DB not ready (attempt {attempt}, {remaining}s left): "
+                f"{exc.__class__.__name__}; retrying in {retry_delay_s}s...",
+                file=sys.stderr,
+            )
+            time.sleep(retry_delay_s)
+    raise RuntimeError(
+        f"DB not ready after {timeout_s}s ({attempt} attempts). "
+        f"Last error: {last_exc}"
+    )
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
@@ -108,6 +145,12 @@ def main() -> int:
     if not migration_files:
         print(f"ERROR: no *.sql files found in {MIGRATIONS_DIR}", file=sys.stderr)
         return 1
+
+    # Wait for the DB to be ready. On a fresh Blueprint deploy the API's
+    # preDeployCommand can fire before brilliant-db is accepting
+    # connections (Render has no inter-service depends_on). Retry for
+    # up to 120s instead of failing on the first connection refused.
+    _wait_for_db(dsn)
 
     # Phase 1: ensure tracking table exists (autocommit, so the DDL commits
     # even if the per-migration loop aborts).
