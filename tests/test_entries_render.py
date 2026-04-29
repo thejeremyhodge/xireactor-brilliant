@@ -292,3 +292,98 @@ def test_no_wiki_token_short_circuits_db_query():
     assert conn.calls == [], (
         f"resolver must not issue a DB query when '[[' is absent; got {conn.calls!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Wiki-link regex captures Obsidian table-cell escape shape
+# `[[slug\|alias]]` cleanly (sprint 0046 / Bug A render-side regression).
+#
+# Pure unit test against the compiled regex. No DB, no API.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(False, reason="pure unit test; always runs")
+def test_wiki_link_regex_captures_table_escape_form():
+    import sys
+    import pathlib
+
+    api_dir = pathlib.Path(__file__).resolve().parents[1] / "api"
+    if str(api_dir) not in sys.path:
+        sys.path.insert(0, str(api_dir))
+
+    from services.render import _WIKI_LINK_RE  # type: ignore
+
+    cases = [
+        # (input, expected slug, expected alias)
+        ("[[target-a\\|Alpha]]", "target-a", "Alpha"),  # table-cell escape
+        ("[[target-a|Alpha]]", "target-a", "Alpha"),     # plain pipe
+        ("[[target-a]]", "target-a", None),               # no alias
+        ("[[a\\|b]]", "a", "b"),                          # single-char escape
+    ]
+    for content, want_slug, want_alias in cases:
+        m = _WIKI_LINK_RE.search(content)
+        assert m is not None, f"regex failed to match {content!r}"
+        assert m.group(1) == want_slug, (
+            f"slug mismatch for {content!r}: got {m.group(1)!r}, want {want_slug!r}"
+        )
+        assert m.group(2) == want_alias, (
+            f"alias mismatch for {content!r}: got {m.group(2)!r}, want {want_alias!r}"
+        )
+
+    # Mixed line — make sure findall returns both matches with correct shapes.
+    matches = _WIKI_LINK_RE.findall(
+        "See [[target-a\\|Alpha]] and [[target-b]] for context."
+    )
+    assert matches == [("target-a", "Alpha"), ("target-b", "")], (
+        f"mixed-line findall mismatch: {matches!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: resolve_wiki_links rewrites table-escape `[[slug\|alias]]` to
+# `[alias](/kb/<id>)` end-to-end against a fake conn (no API, no DB).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(False, reason="pure unit test; always runs")
+def test_resolve_wiki_links_rewrites_table_escape():
+    import sys
+    import pathlib
+
+    api_dir = pathlib.Path(__file__).resolve().parents[1] / "api"
+    if str(api_dir) not in sys.path:
+        sys.path.insert(0, str(api_dir))
+
+    from services.render import resolve_wiki_links  # type: ignore
+
+    target_id_a = "11111111-1111-1111-1111-111111111111"
+    target_id_b = "22222222-2222-2222-2222-222222222222"
+
+    class _StubConn:
+        async def execute(self, sql, params=None):
+            class _Cur:
+                async def fetchall(self_inner):
+                    return [
+                        (target_id_a, "Alpha Title", "target-a"),
+                        (target_id_b, "Beta Title", "target-b"),
+                    ]
+            return _Cur()
+
+    content = (
+        "| Entry | Notes |\n"
+        "|-------|-------|\n"
+        "| [[target-a\\|Alpha]] | [[target-b]] |\n"
+    )
+    out = asyncio.run(
+        resolve_wiki_links(content, _StubConn(), "00000000-0000-0000-0000-000000000000")
+    )
+    assert f"[Alpha](/kb/{target_id_a})" in out, (
+        f"table-escape alias did not resolve: {out!r}"
+    )
+    assert f"[Beta Title](/kb/{target_id_b})" in out, (
+        f"plain `[[target-b]]` did not resolve: {out!r}"
+    )
+    # And the literal `[[target-a\|Alpha]]` form must be gone.
+    assert "[[target-a\\|" not in out, (
+        f"literal table-escape leaked through: {out!r}"
+    )

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tarfile
 import zipfile
 
@@ -22,6 +23,7 @@ from services.frontmatter import (
     parse_frontmatter,
 )
 from services import audit
+from services.audit import _app_role_to_pg_role
 from services.links import sync_entry_links
 from services.storage import get_storage
 from services.vault_walker import iter_archive_md, resolve_exclude_patterns
@@ -46,7 +48,7 @@ router = APIRouter(tags=["import"])
 # Regex to detect [[wiki-links]] in markdown content.
 # Captures up to the first | (display text) or # (heading anchor) or ]],
 # handling [[Note]], [[Note|display]], and [[Note#Heading]] formats.
-_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#\\]+)")
 
 # Regex for inline #tags in content (but not ## headings)
 _INLINE_TAG_RE = re.compile(r"(?:^|\s)#([a-zA-Z][\w-]*)", re.MULTILINE)
@@ -272,11 +274,27 @@ async def detect_collisions(
     return collisions
 
 
-async def _resolve_content_type(conn, meta: dict, filename: str, logical_path: str):
+async def _resolve_content_type(
+    conn,
+    meta: dict,
+    filename: str,
+    logical_path: str,
+    user: UserContext,
+):
     """Resolve content_type from frontmatter, registry, daily note pattern, or path inference.
 
     Returns (content_type, type_mapping_or_None, unrecognized_type_or_None).
     Accepts both `content_type` (preferred, #25) and the legacy `type` alias.
+
+    When frontmatter declares a type that is not in
+    `content_type_registry`, the type is auto-registered with
+    `is_active=false` inside a privilege-scoped savepoint
+    (`SET LOCAL ROLE kb_admin`) mirroring `api/services/audit.py::record`.
+    The declared type is then used verbatim on the entry — the registry
+    change is runtime-only (no migration) and admins promote the row via
+    an explicit `UPDATE ... SET is_active=true` grant. The raw type is
+    still returned in the `unrecognized_type` slot so callers can surface
+    it in `unrecognized_types` for admin review (spec 0046 / T-0272.2).
     """
     raw_type = meta.get("content_type", "") or meta.get("type", "")
     if isinstance(raw_type, list):
@@ -292,8 +310,55 @@ async def _resolve_content_type(conn, meta: dict, filename: str, logical_path: s
         if reg_row:
             canonical = reg_row[1] if reg_row[1] else reg_row[0]
             return canonical, (raw_type, canonical), None
-        else:
-            return infer_content_type(logical_path), None, raw_type
+
+        # Auto-register the unknown type as is_active=false. RLS grants
+        # INSERT on `content_type_registry` to `kb_admin` only, so we
+        # briefly elevate inside a SAVEPOINT and restore the caller's
+        # role before RELEASE — identical pattern to audit.record.
+        sp_name = f"sp_autoreg_{secrets.token_hex(6)}"
+        pg_role = _app_role_to_pg_role(user.role, user.source)
+        try:
+            await conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                await conn.execute("SET LOCAL ROLE kb_admin")
+                await conn.execute(
+                    """
+                    INSERT INTO content_type_registry (name, description, is_active)
+                    VALUES (%s, 'Auto-registered from vault import — promote via admin', false)
+                    ON CONFLICT (name) DO NOTHING
+                    """,
+                    (raw_type,),
+                )
+            finally:
+                # Restore caller's role before RELEASE so the outer
+                # transaction continues under the original role.
+                try:
+                    await conn.execute(f"SET LOCAL ROLE {pg_role}")
+                except Exception:  # pragma: no cover — defensive
+                    logger.exception(
+                        "_resolve_content_type: failed to restore role to %s",
+                        pg_role,
+                    )
+            await conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except Exception:
+            # Don't block the import — log + rollback the savepoint so the
+            # outer transaction remains valid. The declared type is still
+            # used on the entry; only the registry side-effect is lost.
+            logger.exception(
+                "_resolve_content_type: auto-register failed for %r — continuing",
+                raw_type,
+            )
+            try:
+                await conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                await conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:  # pragma: no cover — defensive
+                logger.exception(
+                    "_resolve_content_type: failed to rollback savepoint %s",
+                    sp_name,
+                )
+
+        # Use the declared type verbatim; still flag via unrecognized_types.
+        return raw_type, None, raw_type
     elif _DAILY_NOTE_RE.match(filename):
         return "daily", None, None
     else:
@@ -338,7 +403,7 @@ async def import_preview(
         for fd in parsed_files:
             try:
                 content_type, mapping, unrec = await _resolve_content_type(
-                    conn, fd["meta"], fd["filename"], fd["logical_path"]
+                    conn, fd["meta"], fd["filename"], fd["logical_path"], user
                 )
                 fd["content_type"] = content_type
                 if mapping:
@@ -431,6 +496,10 @@ async def _execute_import(
     errors: list[str] = []
     type_mappings: dict[str, str] = {}
     unrecognized_types: set[str] = set()
+    # Aggregate unresolved wikilink / internal-markdown targets across every
+    # file so the HTTP response can surface them (see T-0272.3). Set-dedup
+    # means a target referenced from many MOCs counts once.
+    all_unresolved: set[str] = set()
 
     # Whether this user goes through staging
     use_staging = user.role in ("commenter", "viewer") or user.key_type == "agent"
@@ -517,18 +586,20 @@ async def _execute_import(
                 created += 1  # count as processed
                 continue
 
-            # Resolve content_type (frontmatter governance wins over
-            # registry/inference when it already validated).
-            if "content_type" in governance:
-                content_type = governance["content_type"]
-            else:
-                content_type, mapping, unrec = await _resolve_content_type(
-                    conn, meta, file.filename, logical_path
-                )
-                if mapping:
-                    type_mappings[mapping[0]] = mapping[1]
-                if unrec:
-                    unrecognized_types.add(unrec)
+            # Resolve content_type unconditionally. `_resolve_content_type`
+            # handles the full spectrum: registry hit (known type, no side
+            # effect), registry miss with frontmatter-declared type
+            # (auto-register `is_active=false` + flag as unrecognized), and
+            # frontmatter-silent (fall back to path inference). Short-circuiting
+            # on `governance["content_type"]` skips the auto-register side
+            # effect and breaks `moc` round-tripping (spec 0046 AC #3).
+            content_type, mapping, unrec = await _resolve_content_type(
+                conn, meta, file.filename, logical_path, user
+            )
+            if mapping:
+                type_mappings[mapping[0]] = mapping[1]
+            if unrec:
+                unrecognized_types.add(unrec)
 
             # Sensitivity / department / summary come from frontmatter
             # when provided; otherwise fall back to existing defaults.
@@ -640,7 +711,7 @@ async def _execute_import(
     # INSERTs so cross-file references within this batch resolve correctly.
     for source_id, content in pending_links:
         try:
-            linked += await sync_entry_links(
+            batch_linked, batch_unresolved = await sync_entry_links(
                 conn,
                 source_id,
                 content,
@@ -649,6 +720,8 @@ async def _execute_import(
                 user.source,
                 import_batch_id=batch_id,
             )
+            linked += batch_linked
+            all_unresolved.update(batch_unresolved)
         except Exception as exc:
             errors.append(f"link {source_id}: {str(exc)}")
 
@@ -680,6 +753,10 @@ async def _execute_import(
         unrecognized_types=sorted(unrecognized_types),
         batch_id=batch_id,
         collisions_resolved=collisions_resolved,
+        unresolved_links=len(all_unresolved),
+        # Truncate the sample to 20 — a 1000-target list over HTTP is noisy
+        # and the per-entry INFO log keeps the full set available for ops.
+        unresolved_links_sample=sorted(all_unresolved)[:20],
     )
 
 
@@ -1368,7 +1445,34 @@ def _render_vault_upload_page() -> str:
               "<code>rollback_import(batch_id=\\"" + escapeHtml(p.batch_id) +
               "\\")</code> from Claude, or " +
               "<code>DELETE /import/" + escapeHtml(p.batch_id) + "</code>.";
+            html +=
+              "<br><br><a href=\\"#\\" id=\\"see-3d\\" " +
+              "style=\\"color:#7e88ff;font-size:13px;text-decoration:none;\\">" +
+              "✨ See it in 3D</a>";
             renderPanel("ok", html);
+            var see3dLink = document.getElementById("see-3d");
+            if (see3dLink) {{
+              see3dLink.addEventListener("click", function (ev) {{
+                ev.preventDefault();
+                var apiKey = null;
+                try {{ apiKey = window.localStorage.getItem(STORAGE_KEY); }} catch (e) {{}}
+                if (!apiKey) {{
+                  alert("Graph not ready. Refresh in 30 seconds.");
+                  return;
+                }}
+                fetch("/import/visualize", {{
+                  headers: {{ "Authorization": "Bearer " + apiKey }}
+                }}).then(function (r) {{
+                  if (!r.ok) throw new Error("not ready");
+                  return r.text();
+                }}).then(function (htmlText) {{
+                  var blob = new Blob([htmlText], {{ type: "text/html" }});
+                  window.open(URL.createObjectURL(blob), "_blank");
+                }}).catch(function () {{
+                  alert("Graph not ready. Refresh in 30 seconds.");
+                }});
+              }});
+            }}
           }} else {{
             var detail = null;
             if (res.payload && res.payload.detail !== undefined) {{
@@ -1439,6 +1543,160 @@ async def vault_upload_page() -> HTMLResponse:
     unauthenticated so the page can render the paste-your-key fallback.
     """
     return HTMLResponse(_render_vault_upload_page())
+
+
+# ---------------------------------------------------------------------------
+# GET /import/visualize — 3D KB preview Easter egg (V2 demo, Sprint 0047)
+# ---------------------------------------------------------------------------
+#
+# Returns a self-contained branded HTML page rendering the caller's whole-org
+# graph using the frontend-supplied template at api/templates/kb_graph_3d.html.
+# Caps: 3000 nodes / 4000 edges. Empty or any error → friendly NOT-READY card.
+
+_VIZ_NODE_CAP = 3000
+_VIZ_EDGE_CAP = 4000
+
+_VIZ_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "templates",
+    "kb_graph_3d.html",
+)
+with open(_VIZ_TEMPLATE_PATH, encoding="utf-8") as _fh:
+    _KB_GRAPH_TEMPLATE = _fh.read()
+
+_VIZ_CARD_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>xiReactor / Brilliant — Knowledge Graph</title>
+<style>
+  body {{ margin:0; min-height:100vh; background:#0a0c14; color:#e8eaf2;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display:flex; align-items:center; justify-content:center; }}
+  .card {{ max-width:480px; padding:32px; text-align:center; }}
+  .brand {{ font-weight:600; letter-spacing:0.04em; color:#7e88ff;
+    font-size:13px; text-transform:uppercase; margin-bottom:16px; }}
+  h1 {{ font-size:24px; margin:0 0 12px; font-weight:600; }}
+  p  {{ margin:0 0 8px; color:#aab0c5; }}
+  .footer {{ position:fixed; bottom:18px; left:0; right:0; text-align:center;
+    font-size:12px; color:#5a6280; }}
+</style></head><body>
+<div class="card">
+  <div class="brand">xiReactor / Brilliant — Knowledge Graph</div>
+  <h1>{title}</h1>
+  <p>{hint}</p>
+</div>
+<div class="footer">xireactor.com/brilliant</div>
+</body></html>"""
+
+
+def _viz_card(title: str, hint: str) -> str:
+    return _VIZ_CARD_HTML.format(title=title, hint=hint)
+
+
+@router.get("/visualize", response_class=HTMLResponse)
+async def visualize_graph(
+    user: UserContext = Depends(get_current_user),
+) -> HTMLResponse:
+    """Render the caller's KB as a self-contained 3D-graph HTML page.
+
+    Bearer api_key required (handled by ``get_current_user``). On the happy
+    path, the frontend-supplied template at ``api/templates/kb_graph_3d.html``
+    is loaded once at module import and the single ``__GRAPH_DATA_JSON__``
+    placeholder is replaced with compact JSON of the graph payload.
+
+    Caps: 3000 nodes / 4000 edges. Above that → branded "exceeds demo
+    limits" card; the heavy template is never invoked. Empty (0 nodes) or
+    any internal error → branded "Graph not ready. Refresh in 30 seconds."
+    card. Errors are logged but never bubbled.
+    """
+    try:
+        async with get_db(user) as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM entries WHERE status != 'archived'"
+            )
+            total_nodes = int((await cur.fetchone())[0])
+
+            if total_nodes == 0:
+                return HTMLResponse(
+                    _viz_card("Graph not ready.", "Refresh in 30 seconds.")
+                )
+
+            if total_nodes > _VIZ_NODE_CAP:
+                return HTMLResponse(
+                    _viz_card(
+                        "Wow, you have a large knowledge base.",
+                        "This exceeds the demo visualization limits.",
+                    )
+                )
+
+            cur = await conn.execute(
+                """
+                SELECT id, title, content_type
+                FROM entries
+                WHERE status != 'archived'
+                ORDER BY updated_at DESC
+                """
+            )
+            cur.row_factory = dict_row
+            node_rows = await cur.fetchall()
+            node_ids = [str(r["id"]) for r in node_rows]
+
+            cur = await conn.execute(
+                """
+                SELECT source_entry_id, target_entry_id, link_type
+                FROM entry_links
+                WHERE source_entry_id = ANY(%s)
+                  AND target_entry_id = ANY(%s)
+                """,
+                (node_ids, node_ids),
+            )
+            cur.row_factory = dict_row
+            edge_rows = await cur.fetchall()
+    except Exception:
+        logger.exception("visualize_graph: graph fetch failed")
+        return HTMLResponse(
+            _viz_card("Graph not ready.", "Refresh in 30 seconds.")
+        )
+
+    # Server-side dedup, canonical (min, max, link_type) — mirrors /graph.
+    edge_keys: set[tuple[str, str, str]] = set()
+    edges: list[dict] = []
+    for r in edge_rows:
+        a = str(r["source_entry_id"])
+        b = str(r["target_entry_id"])
+        lo, hi = (a, b) if a <= b else (b, a)
+        key = (lo, hi, r["link_type"])
+        if key in edge_keys:
+            continue
+        edge_keys.add(key)
+        edges.append({"source": lo, "target": hi, "link_type": r["link_type"]})
+
+    if len(edges) > _VIZ_EDGE_CAP:
+        return HTMLResponse(
+            _viz_card(
+                "Wow, you have a large knowledge base.",
+                "This exceeds the demo visualization limits.",
+            )
+        )
+
+    graph_data = {
+        "nodes": [
+            {
+                "id": str(r["id"]),
+                "title": r["title"],
+                "content_type": r["content_type"],
+            }
+            for r in node_rows
+        ],
+        "edges": edges,
+        "truncated": False,
+        "total_nodes": total_nodes,
+    }
+    rendered = _KB_GRAPH_TEMPLATE.replace(
+        "__GRAPH_DATA_JSON__",
+        json.dumps(graph_data, separators=(",", ":")),
+    )
+    return HTMLResponse(rendered)
 
 
 # ---------------------------------------------------------------------------

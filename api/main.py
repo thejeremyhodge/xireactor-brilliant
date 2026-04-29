@@ -4,7 +4,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -73,12 +73,34 @@ async def _publish_public_url_to_db(pool) -> None:
         )
 
 
+def _log_ready_banner() -> None:
+    """Emit an unmistakable "ready" marker for operators watching Render logs.
+
+    A fresh Render deploy can take ~3-4 min from "deploy started" to "edge
+    routing live". Without an explicit marker, a non-technical operator
+    watching the log stream has no signal for when it's safe to click the
+    setup link. This banner is the signal: when this line scrolls past,
+    open the URL.
+    """
+    public_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    setup_url = f"{public_url}/setup" if public_url else "http://localhost:8010/setup"
+    bar = "=" * 64
+    # WARNING level (not INFO) so the banner survives the default
+    # logger threshold — `brilliant.api` has no handler/level config,
+    # so info() falls through Python's lastResort and gets dropped.
+    logger.warning(bar)
+    logger.warning("  YOUR BRILLIANT SYSTEM IS COMPLETELY READY NOW")
+    logger.warning("  Open: %s", setup_url)
+    logger.warning(bar)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage connection pool lifecycle and run startup bootstrap."""
     await init_pool()
     await _publish_public_url_to_db(get_pool())
     await ensure_admin_user(get_pool())
+    _log_ready_banner()
     yield
     await close_pool()
 
@@ -110,6 +132,19 @@ app.add_middleware(RequestLogMiddleware)
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.head("/")
+async def root_head():
+    """Lightweight HEAD / for Render's edge health probe.
+
+    Render's port-detection probe hits HEAD / repeatedly during the
+    "service is live → port detected" handoff. Without this handler,
+    FastAPI returns 405 Method Not Allowed and Render's edge can take
+    minutes to finalize routing (5min gap observed on 2026-04-28 deploy).
+    Mirrors the fix already applied to the MCP service (commit 5772ea3).
+    """
+    return Response(status_code=200)
 
 
 @app.get("/")

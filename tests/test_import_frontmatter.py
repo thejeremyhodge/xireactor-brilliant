@@ -137,9 +137,25 @@ def test_extract_governance_fields_rejects_unknown_sensitivity():
     assert "sensitivity" not in gov  # not in VALID_SENSITIVITIES
 
 
-def test_extract_governance_fields_rejects_unknown_content_type():
+def test_extract_governance_fields_accepts_unknown_content_type():
+    """`content_type_registry` is the sole authority (spec 0046 / T-0272.2).
+
+    Unknown values are no longer dropped at parse time — they pass through
+    so `_resolve_content_type` can auto-register them as `is_active=false`
+    in the registry table.
+    """
     gov = extract_governance_fields({"content_type": "invented"})
-    assert "content_type" not in gov
+    assert gov["content_type"] == "invented"
+
+
+def test_extract_governance_fields_accepts_moc():
+    """`type: moc` is the motivating case for spec 0046 — a MOC (Map of
+    Content) hub note. It must round-trip unchanged through
+    `extract_governance_fields` so the subsequent registry lookup can
+    auto-register it.
+    """
+    gov = extract_governance_fields({"content_type": "moc"})
+    assert gov["content_type"] == "moc"
 
 
 def test_extract_governance_fields_content_type_alias_accepted():
@@ -183,7 +199,7 @@ def test_build_domain_meta_strips_known_keys_keeps_unknown():
 
 import re  # noqa: E402
 
-_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#\\]+)")
 
 
 @pytest.mark.parametrize(
@@ -194,6 +210,9 @@ _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
         ("Pipe display: [[Alpha|the alpha project]].", ["Alpha"]),
         ("Heading anchor: [[Alpha#Section]].", ["Alpha"]),
         ("No wikilinks here.", []),
+        ("Table: [[ent-0567\\|display]]", ["ent-0567"]),
+        ("Mixed: [[Alpha]] and [[ent-0567\\|x]]", ["Alpha", "ent-0567"]),
+        ("Trailing backslash no pipe: [[ent-0567\\]]", ["ent-0567"]),
     ],
 )
 def test_wiki_link_regex(content, expected):

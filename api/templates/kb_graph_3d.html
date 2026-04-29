@@ -1,0 +1,934 @@
+<!doctype html>
+<!--
+  Source: xireactor-brilliant-frontend/.claude/skills/kb-graph-snapshot/template.html @ 28a39ac
+  Backend consumer: xireactor-brilliant — copied to api/templates/kb_graph_3d.html, served by GET /import/visualize.
+  Render contract: backend substitutes the JS-literal data placeholder in the script body (the assignment to `const data`) with compact JSON of GET /graph shape. See BACKEND-HANDOFF.md for the exact token name to keep this comment substitution-safe.
+  Dependency loading: CDN at view time (esm.sh) — three@0.180.0, 3d-force-graph@1.73.3 as ES modules.
+  Network IS required at view time. For an air-gapped (~1–2 MB self-contained) variant, see SKILL.md "Offline variant".
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>xiReactor / Brilliant — Knowledge Graph</title>
+    <link rel="preconnect" href="https://esm.sh" />
+    <style>
+      :root {
+        --bg-dark: #1e1e2e;
+        --bg-crust: #11111b;
+        --text: #cdd6f4;
+        --text-bright: #f0f0ff;
+        --text-dim: #6c7086;
+        --accent: #89b4fa;
+        --border: #2e2e4a;
+        --red: #f38ba8;
+        --yellow: #f9e2af;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg-crust);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #stage {
+        position: fixed;
+        inset: 0;
+        background:
+          radial-gradient(ellipse at center, #1e1e2e 0%, #15151f 55%, #0a0a12 100%);
+      }
+      #stage::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.55) 100%);
+      }
+      #graph {
+        position: absolute;
+        inset: 0;
+      }
+      .overlay {
+        position: fixed;
+        pointer-events: none;
+        z-index: 10;
+        text-shadow: 0 1px 4px rgba(0,0,0,0.65);
+      }
+      .brand {
+        top: 24px;
+        left: 28px;
+      }
+      .brand-wordmark {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+        color: var(--text-bright);
+      }
+      .brand-wordmark .accent { color: var(--accent); }
+      .brand-wordmark .sep { color: var(--text-dim); font-weight: 400; margin: 0 4px; }
+      .brand-tagline {
+        margin-top: 4px;
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      .meta {
+        bottom: 20px;
+        right: 28px;
+        text-align: right;
+      }
+      .meta-domain {
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      .meta-counts {
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+      }
+      .meta-counts .num { color: var(--text-bright); font-weight: 600; }
+      .meta-counts .truncated {
+        margin-left: 8px;
+        color: var(--yellow);
+        border: 1px solid var(--yellow);
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 10px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .legend {
+        bottom: 20px;
+        left: 28px;
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        max-width: 40vw;
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+      .controls {
+        top: 24px;
+        right: 28px;
+        pointer-events: auto;
+        display: flex;
+        gap: 8px;
+      }
+      .icon-btn {
+        appearance: none;
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        border: 1px solid var(--border);
+        background: rgba(17, 17, 27, 0.72);
+        backdrop-filter: blur(4px);
+        color: var(--text-dim);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: color 120ms ease, border-color 120ms ease, background-color 120ms ease;
+      }
+      .icon-btn:hover { color: var(--text); border-color: var(--accent); }
+      .icon-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .icon-btn.active { color: var(--accent); border-color: var(--accent); }
+      @keyframes pulseShot {
+        0%, 100% {
+          color: var(--text-dim);
+          border-color: var(--border);
+          box-shadow: 0 0 0 0 rgba(137, 180, 250, 0);
+        }
+        50% {
+          color: var(--text-bright);
+          border-color: var(--accent);
+          box-shadow: 0 0 14px 2px rgba(137, 180, 250, 0.45);
+        }
+      }
+      #btn-screenshot { animation: pulseShot 2.4s ease-in-out infinite; }
+      #btn-screenshot:hover, #btn-screenshot:focus-visible { animation: none; }
+      .ctl-panel {
+        top: 70px;
+        right: 28px;
+        pointer-events: auto;
+        width: 232px;
+        background: rgba(17, 17, 27, 0.82);
+        backdrop-filter: blur(6px);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 14px 12px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-shadow: none;
+      }
+      .ctl-panel.collapsed { display: none; }
+      .ctl-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text);
+      }
+      .ctl-head button {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: var(--text-dim);
+        font: inherit;
+        cursor: pointer;
+        padding: 0 6px;
+        border-radius: 4px;
+        font-size: 14px;
+        line-height: 1;
+      }
+      .ctl-head button:hover { color: var(--text); background: var(--bg-dark); }
+      .ctl-row { margin-bottom: 8px; }
+      .ctl-row:last-of-type { margin-bottom: 0; }
+      .ctl-row label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 3px;
+        font-variant-numeric: tabular-nums;
+      }
+      .ctl-row label .v { color: var(--text-bright); }
+      .ctl-row input[type="range"] {
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      .ctl-reset {
+        margin-top: 10px;
+        width: 100%;
+        appearance: none;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-dim);
+        font: inherit;
+        padding: 5px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .ctl-reset:hover { color: var(--text); border-color: var(--accent); }
+      .legend .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .legend .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        box-shadow: 0 0 8px currentColor;
+      }
+      .state {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 10px;
+        color: var(--text-dim);
+        font-size: 14px;
+        pointer-events: none;
+        background: radial-gradient(ellipse at center, rgba(30,30,46,0.7) 0%, rgba(10,10,18,0.85) 100%);
+        backdrop-filter: blur(2px);
+        transition: opacity 1100ms ease-out, backdrop-filter 1100ms ease-out;
+      }
+      .state.hidden { opacity: 0; pointer-events: none; backdrop-filter: blur(0); }
+      .state .spinner {
+        width: 28px;
+        height: 28px;
+        border: 2px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .state.error { color: var(--red); pointer-events: auto; }
+      .state.error .hint {
+        margin-top: 8px;
+        color: var(--text-dim);
+        font-size: 12px;
+        max-width: 420px;
+        text-align: center;
+        line-height: 1.5;
+      }
+      .state.error code {
+        background: var(--bg-dark);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 1px 6px;
+        color: var(--text);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+      }
+      .state.notice { pointer-events: auto; }
+      .state .card {
+        padding: 22px 30px;
+        background: rgba(17, 17, 27, 0.82);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        backdrop-filter: blur(6px);
+        text-align: center;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        max-width: 380px;
+      }
+      .state .card-title {
+        color: var(--text-bright);
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .state .card-hint {
+        color: var(--text-dim);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="graph"></div>
+    </div>
+
+    <div class="overlay brand">
+      <div class="brand-wordmark">
+        <span class="accent">xi</span>Reactor<span class="sep">/</span><span class="accent">Brilliant</span>
+      </div>
+      <div class="brand-tagline">Knowledge Graph</div>
+    </div>
+
+    <div class="overlay legend" id="legend"></div>
+
+    <div class="overlay controls">
+      <button type="button" id="btn-tune" class="icon-btn" aria-pressed="false" title="Tune layout">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+      <button type="button" id="btn-playpause" class="icon-btn active" aria-pressed="true" title="Pause rotation">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+      </button>
+      <button type="button" id="btn-screenshot" class="icon-btn" title="Capture screenshot">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      </button>
+    </div>
+
+    <div class="overlay ctl-panel collapsed" id="ctl-panel">
+      <div class="ctl-head">
+        <span>Tune</span>
+        <button type="button" id="ctl-toggle" aria-label="Close">×</button>
+      </div>
+      <div class="ctl-body">
+        <div class="ctl-row">
+          <label>Repulsion <span class="v" id="v-charge">-10</span></label>
+          <input type="range" id="s-charge" min="-80" max="-1" step="1" value="-10" />
+        </div>
+        <div class="ctl-row">
+          <label>Repulsion range <span class="v" id="v-dmax">250</span></label>
+          <input type="range" id="s-dmax" min="50" max="1000" step="10" value="250" />
+        </div>
+        <div class="ctl-row">
+          <label>Link distance <span class="v" id="v-ldist">18</span></label>
+          <input type="range" id="s-ldist" min="5" max="150" step="1" value="18" />
+        </div>
+        <div class="ctl-row">
+          <label>Stickiness <span class="v" id="v-decay">0.40</span></label>
+          <input type="range" id="s-decay" min="0.05" max="0.95" step="0.01" value="0.40" />
+        </div>
+        <div class="ctl-row">
+          <label>Node size <span class="v" id="v-size">0.35×</span></label>
+          <input type="range" id="s-size" min="0.15" max="3" step="0.05" value="0.35" />
+        </div>
+        <button type="button" class="ctl-reset" id="ctl-reset">Reset</button>
+      </div>
+    </div>
+
+    <div class="overlay meta" id="meta">
+      <div class="meta-domain">xireactor.com/brilliant</div>
+      <div class="meta-counts" id="counts">&nbsp;</div>
+    </div>
+
+    <div id="state" class="state">
+      <div class="spinner"></div>
+      <div>Loading knowledge graph…</div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://esm.sh/three@0.180.0",
+          "three/": "https://esm.sh/three@0.180.0/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import ForceGraph3D from "https://esm.sh/3d-force-graph@1.73.3?external=three";
+
+      // ----- Tuning state (sliders bind to this; render reads from it) -----
+      const CTL_DEFAULTS = { charge: -10, dmax: 250, ldist: 18, decay: 0.40, sizeMul: 0.35 };
+      window.__ctl = { ...CTL_DEFAULTS };
+      window.__applyCtl = () => {};        // overwritten in render3D
+      window.__toggleRotation = () => {};  // overwritten in render3D
+      window.__downloadShot = () => {};    // overwritten in render3D
+
+      function wireControls() {
+        const els = {
+          charge: document.getElementById("s-charge"),
+          dmax:   document.getElementById("s-dmax"),
+          ldist:  document.getElementById("s-ldist"),
+          decay:  document.getElementById("s-decay"),
+          size:   document.getElementById("s-size"),
+        };
+        const readouts = {
+          charge: document.getElementById("v-charge"),
+          dmax:   document.getElementById("v-dmax"),
+          ldist:  document.getElementById("v-ldist"),
+          decay:  document.getElementById("v-decay"),
+          size:   document.getElementById("v-size"),
+        };
+        function sync() {
+          readouts.charge.textContent = window.__ctl.charge;
+          readouts.dmax.textContent   = window.__ctl.dmax;
+          readouts.ldist.textContent  = window.__ctl.ldist;
+          readouts.decay.textContent  = window.__ctl.decay.toFixed(2);
+          readouts.size.textContent   = window.__ctl.sizeMul.toFixed(2) + "×";
+        }
+        function pushToInputs() {
+          els.charge.value = window.__ctl.charge;
+          els.dmax.value   = window.__ctl.dmax;
+          els.ldist.value  = window.__ctl.ldist;
+          els.decay.value  = window.__ctl.decay;
+          els.size.value   = window.__ctl.sizeMul;
+        }
+        // Initialize inputs from defaults so HTML and state agree.
+        pushToInputs();
+        els.charge.addEventListener("input", (e) => { window.__ctl.charge = +e.target.value; sync(); window.__applyCtl(); });
+        els.dmax.addEventListener("input",   (e) => { window.__ctl.dmax = +e.target.value;   sync(); window.__applyCtl(); });
+        els.ldist.addEventListener("input",  (e) => { window.__ctl.ldist = +e.target.value;  sync(); window.__applyCtl(); });
+        els.decay.addEventListener("input",  (e) => { window.__ctl.decay = +e.target.value;  sync(); window.__applyCtl(); });
+        els.size.addEventListener("input",   (e) => { window.__ctl.sizeMul = +e.target.value; sync(); window.__applyCtl({ sizeOnly: true }); });
+        document.getElementById("ctl-reset").addEventListener("click", () => {
+          Object.assign(window.__ctl, CTL_DEFAULTS);
+          pushToInputs(); sync(); window.__applyCtl();
+        });
+        const panel = document.getElementById("ctl-panel");
+        const toggleBtn = document.getElementById("ctl-toggle");
+        const gearBtn = document.getElementById("btn-tune");
+        const setOpen = (open) => {
+          panel.classList.toggle("collapsed", !open);
+          gearBtn.classList.toggle("active", open);
+          gearBtn.setAttribute("aria-pressed", String(open));
+        };
+        toggleBtn.addEventListener("click", () => setOpen(false));
+        gearBtn.addEventListener("click", () => setOpen(panel.classList.contains("collapsed")));
+        sync();
+      }
+
+      function wireActionButtons() {
+        const playBtn = document.getElementById("btn-playpause");
+        const playIcon  = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="6,4 20,12 6,20"/></svg>';
+        const pauseIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+        playBtn.addEventListener("click", () => {
+          const nowRotating = window.__toggleRotation();
+          playBtn.classList.toggle("active", nowRotating);
+          playBtn.setAttribute("aria-pressed", String(nowRotating));
+          playBtn.title = nowRotating ? "Pause rotation" : "Resume rotation";
+          playBtn.innerHTML = nowRotating ? pauseIcon : playIcon;
+        });
+        document.getElementById("btn-screenshot").addEventListener("click", () => window.__downloadShot());
+      }
+
+      // ----- Config -----
+      const CONTENT_TYPE_COLORS = {
+        concept: "#89b4fa",      // blue
+        policy: "#f38ba8",       // red
+        procedure: "#a6e3a1",    // green
+        decision: "#f9e2af",     // yellow
+        reference: "#cba6f7",    // purple
+        note: "#94e2d5",         // teal
+        project: "#fab387",      // orange
+        person: "#f5c2e7",       // pink
+        meeting: "#74c7ec",      // sky
+        organization: "#b4befe", // lavender
+        event: "#eba0ac",        // maroon
+        task: "#f2cdcd",         // flamingo
+      };
+      const DEFAULT_COLOR = "#9399b2";  // muted gray — visibly distinct from any mapped type
+      const HIGHLIGHT_COLOR = "#f9e2af";
+
+      const stateEl = document.getElementById("state");
+      const countsEl = document.getElementById("counts");
+      const legendEl = document.getElementById("legend");
+
+      function showError(title, hint) {
+        stateEl.classList.remove("hidden");
+        stateEl.classList.add("error");
+        stateEl.innerHTML = `
+          <div>${title}</div>
+          ${hint ? `<div class="hint">${hint}</div>` : ""}
+        `;
+      }
+
+      function showNotice(title, hint) {
+        stateEl.classList.remove("hidden");
+        stateEl.classList.add("notice");
+        stateEl.innerHTML = `
+          <div class="card">
+            <div class="card-title">${title}</div>
+            ${hint ? `<div class="card-hint">${hint}</div>` : ""}
+          </div>
+        `;
+      }
+
+      function hideState() {
+        stateEl.classList.add("hidden");
+      }
+
+      // ----- Render -----
+      function buildLegend(presentTypes) {
+        const entries = Array.from(presentTypes)
+          .sort()
+          .map((t) => {
+            const color = CONTENT_TYPE_COLORS[t] || DEFAULT_COLOR;
+            return `<span class="chip"><span class="dot" style="color:${color};background:${color}"></span>${t}</span>`;
+          });
+        legendEl.innerHTML = entries.join("");
+      }
+
+      function prepareData(data) {
+        const nodes = data.nodes.map((n) => ({
+          id: n.id,
+          title: n.title,
+          content_type: n.content_type,
+          color: CONTENT_TYPE_COLORS[n.content_type] || DEFAULT_COLOR,
+        }));
+        const nodeIds = new Set(nodes.map((n) => n.id));
+        const links = (data.edges || [])
+          .filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target))
+          .map((e) => ({
+            source: e.source,
+            target: e.target,
+            link_type: e.link_type,
+          }));
+
+        // Degree map → drives node sizing
+        const degreeMap = new Map();
+        links.forEach((l) => {
+          degreeMap.set(l.source, (degreeMap.get(l.source) || 0) + 1);
+          degreeMap.set(l.target, (degreeMap.get(l.target) || 0) + 1);
+        });
+        nodes.forEach((n) => { n.degree = degreeMap.get(n.id) || 0; });
+
+        const presentTypes = new Set(nodes.map((n) => n.content_type));
+        buildLegend(presentTypes);
+
+        const countLabel =
+          `<span class="num">${nodes.length}</span> entries · ` +
+          `<span class="num">${links.length}</span> links` +
+          (data.truncated
+            ? `<span class="truncated" title="Showing ${nodes.length} of ${data.total_nodes}">truncated</span>`
+            : "");
+        countsEl.innerHTML = countLabel;
+
+        return { nodes, links };
+      }
+
+      function render3D({ nodes, links }) {
+        // ----- Sprite halo texture (soft radial glow) -----
+        const haloTex = (() => {
+          const size = 128;
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = size;
+          const ctx = canvas.getContext("2d");
+          const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+          g.addColorStop(0.0, "rgba(255,255,255,1.0)");
+          g.addColorStop(0.3, "rgba(255,255,255,0.55)");
+          g.addColorStop(0.7, "rgba(255,255,255,0.08)");
+          g.addColorStop(1.0, "rgba(255,255,255,0.0)");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, size, size);
+          const t = new THREE.Texture(canvas);
+          t.needsUpdate = true;
+          return t;
+        })();
+
+        function nodeObject(node) {
+          const group = new THREE.Group();
+          const color = new THREE.Color(node.color);
+
+          // sqrt scaling: 0→1.0x, 1→1.25x, 10→1.79x, 100→3.5x — multiplied by user-tunable sizeMul.
+          const scale = (1 + Math.sqrt(node.degree || 0) * 0.45) * (window.__ctl?.sizeMul ?? 1);
+
+          // core sphere
+          const core = new THREE.Mesh(
+            new THREE.SphereGeometry(3.2 * scale, 16, 16),
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 })
+          );
+          group.add(core);
+
+          // additive halo sprite
+          const halo = new THREE.Sprite(
+            new THREE.SpriteMaterial({
+              map: haloTex,
+              color,
+              transparent: true,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false,
+              opacity: 0.9,
+            })
+          );
+          const haloSize = 16 * scale;
+          halo.scale.set(haloSize, haloSize, 1);
+          group.add(halo);
+
+          return group;
+        }
+
+        const graph = ForceGraph3D({
+          rendererConfig: { antialias: true, alpha: true, preserveDrawingBuffer: true }
+        })(document.getElementById("graph"))
+          .backgroundColor("rgba(0,0,0,0)")
+          .graphData({ nodes, links })
+          .nodeId("id")
+          .nodeLabel((n) => `<div style="font-size:12px;color:#f0f0ff;padding:4px 8px;background:#1e1e2e;border:1px solid #2e2e4a;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.5)"><strong>${n.title}</strong><div style="color:#6c7086;font-size:10px;margin-top:2px;text-transform:uppercase;letter-spacing:0.12em">${n.content_type}</div></div>`)
+          .nodeThreeObject(nodeObject)
+          .nodeRelSize(4)
+          .linkColor(() => "rgba(205, 214, 244, 0.38)")
+          .linkWidth(0.7)
+          .linkOpacity(0.8)
+          .linkDirectionalParticles(1)
+          .linkDirectionalParticleWidth(1.2)
+          .linkDirectionalParticleSpeed(0.002)
+          .linkDirectionalParticleColor(() => "rgba(137, 180, 250, 0.9)")
+          .cooldownTicks(200)
+          .warmupTicks(20)
+          .showNavInfo(false);
+
+        // Initial force config — same numbers slider defaults bind to.
+        graph.d3Force("charge").strength(window.__ctl.charge).distanceMax(window.__ctl.dmax);
+        if (graph.d3Force("link")) graph.d3Force("link").distance(window.__ctl.ldist);
+        if (typeof graph.d3VelocityDecay === "function") graph.d3VelocityDecay(window.__ctl.decay);
+
+        // Slider-driven retune (called on every input change).
+        window.__applyCtl = (opts = {}) => {
+          graph.d3Force("charge").strength(window.__ctl.charge).distanceMax(window.__ctl.dmax);
+          if (graph.d3Force("link")) graph.d3Force("link").distance(window.__ctl.ldist);
+          if (typeof graph.d3VelocityDecay === "function") graph.d3VelocityDecay(window.__ctl.decay);
+          if (opts.sizeOnly) {
+            // Reassign the same nodeThreeObject fn — invalidates the lib's per-node cache so
+            // the new sizeMul is picked up without disturbing the simulation.
+            graph.nodeThreeObject(nodeObject);
+          } else if (typeof graph.d3ReheatSimulation === "function") {
+            graph.d3ReheatSimulation();
+          }
+        };
+
+        // Transparent canvas so our CSS gradient shows through
+        graph.renderer().setClearColor(0x000000, 0);
+
+        // ----- Auto-rotate camera around origin on Y axis -----
+        const RADIUS_FLOOR = 260;
+        const ROT_SECONDS = 75; // one full turn every ~75s
+        const angularSpeed = (Math.PI * 2) / (ROT_SECONDS * 1000);
+        let angle = 0;
+        let lastTs = performance.now();
+        let rotating = true;
+        let resumeTimer = null;
+
+        // Initial camera distance — scales gently with node count.
+        // This is a placeholder; refitCameraTo90thPercentile() below replaces it
+        // once the simulation cools, so the main cluster fills the frame instead
+        // of being squashed to fit a few far-flung disconnected outliers.
+        const initialZ = Math.max(RADIUS_FLOOR, 22 * Math.sqrt(Math.max(nodes.length, 1)));
+        graph.cameraPosition({ x: 0, y: 0, z: initialZ }, undefined, 0);
+
+        // After the engine settles, snap camera so 95% of nodes are in frame.
+        // Force-graph's default `center` force pins the cluster centroid near origin,
+        // so distance-from-origin is a fine proxy for distance-from-centroid here.
+        // Spinner stays up until this fires so the user only ever sees the settled,
+        // properly-framed pose — never the placeholder distance or a zoom animation.
+        let refitDone = false;
+        function refitCameraTo90thPercentile() {
+          if (refitDone) return;
+          refitDone = true;
+          const dists = nodes
+            .map((n) => Math.hypot(n.x || 0, n.y || 0, n.z || 0))
+            .sort((a, b) => a - b);
+          if (dists.length) {
+            const R = dists[Math.floor(dists.length * 0.95)] || RADIUS_FLOOR;
+            const camera = graph.camera && graph.camera();
+            const vfovDeg = (camera && camera.fov) || 50;
+            const vfovRad = (vfovDeg * Math.PI) / 180;
+            // Frame radius R at distance D = R / tan(vfov/2), with 15% breathing room.
+            const D = Math.max(RADIUS_FLOOR, (R / Math.tan(vfovRad / 2)) * 1.15);
+            // Pause auto-rotate so the lib's own camera tween isn't overwritten each frame.
+            // Rotation resumes after the transition, which runs in tandem with the
+            // overlay's CSS opacity fade — masks the motion so there's no pop.
+            const REVEAL_MS = 1100;
+            rotating = false;
+            graph.cameraPosition({ x: 0, y: 0, z: D }, { x: 0, y: 0, z: 0 }, REVEAL_MS);
+            setTimeout(() => {
+              if (userPaused) return;
+              const c = graph.cameraPosition();
+              angle = Math.atan2(c.x, c.z);
+              rotating = true;
+            }, REVEAL_MS + 50);
+          }
+          hideState();
+        }
+        graph.onEngineStop(refitCameraTo90thPercentile);
+        // Fallback: if the engine somehow never reports stop (e.g. tiny graph, or a
+        // pathological layout), don't leave the user staring at a spinner forever.
+        setTimeout(refitCameraTo90thPercentile, 6000);
+
+        // User-driven (button) toggle — sticky, no auto-resume.
+        let userPaused = false;
+
+        // Mouse-drag / wheel pause — temporary, auto-resumes after 2.5s if user hasn't toggled.
+        function nudgePause() {
+          if (userPaused) return;
+          rotating = false;
+          if (resumeTimer) clearTimeout(resumeTimer);
+          resumeTimer = setTimeout(() => {
+            if (userPaused) return;
+            const c = graph.cameraPosition();
+            angle = Math.atan2(c.x, c.z);
+            rotating = true;
+          }, 2500);
+        }
+
+        window.__toggleRotation = () => {
+          userPaused = !userPaused;
+          if (userPaused) {
+            rotating = false;
+            if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+          } else {
+            const c = graph.cameraPosition();
+            angle = Math.atan2(c.x, c.z);
+            rotating = true;
+          }
+          return !userPaused; // true = now rotating
+        };
+
+        // Social-share screenshot: 4:3 PNG with brand chrome composited in canvas2D.
+        const SHOT_W = 1600;
+        const SHOT_H = 1200;
+
+        function drawChrome(ctx, W, H) {
+          ctx.save();
+          ctx.shadowColor = "rgba(0,0,0,0.7)";
+          ctx.shadowBlur = 6;
+          ctx.shadowOffsetY = 2;
+
+          // Top-left wordmark — large, social-prominent
+          const mx = 56, my = 100;
+          const sansBold = '700 56px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+          const sansThin = '400 56px ui-sans-serif, system-ui, sans-serif';
+          ctx.textBaseline = "alphabetic";
+          let x = mx;
+          ctx.font = sansBold;
+          ctx.fillStyle = "#89b4fa"; ctx.fillText("xi", x, my); x += ctx.measureText("xi").width;
+          ctx.fillStyle = "#f0f0ff"; ctx.fillText("Reactor", x, my); x += ctx.measureText("Reactor").width;
+          ctx.font = sansThin;
+          ctx.fillStyle = "#6c7086"; ctx.fillText(" / ", x, my); x += ctx.measureText(" / ").width;
+          ctx.font = sansBold;
+          ctx.fillStyle = "#89b4fa"; ctx.fillText("Brilliant", x, my);
+
+          // Tagline
+          ctx.font = "20px ui-sans-serif, system-ui, sans-serif";
+          ctx.letterSpacing = "0.24em";
+          ctx.fillStyle = "#9399b2";
+          ctx.fillText("KNOWLEDGE GRAPH", mx, my + 36);
+          ctx.letterSpacing = "0px";
+
+          // Bottom-left legend (only types actually present)
+          const presentTypes = Array.from(new Set(nodes.map((n) => n.content_type))).sort();
+          ctx.font = "20px ui-sans-serif, system-ui, sans-serif";
+          ctx.textBaseline = "middle";
+          ctx.textAlign = "left";
+          let lx = 56;
+          const ly = H - 60;
+          presentTypes.forEach((t) => {
+            const color = CONTENT_TYPE_COLORS[t] || DEFAULT_COLOR;
+            // halo dot
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 14;
+            ctx.beginPath();
+            ctx.arc(lx + 8, ly, 8, 0, Math.PI * 2);
+            ctx.fill();
+            // label
+            ctx.shadowBlur = 6;
+            ctx.shadowColor = "rgba(0,0,0,0.7)";
+            ctx.fillStyle = "#bac2de";
+            ctx.fillText(t, lx + 26, ly);
+            lx += 26 + ctx.measureText(t).width + 26;
+          });
+
+          // Bottom-right domain + counts
+          const rx = W - 56;
+          ctx.textBaseline = "alphabetic";
+          ctx.textAlign = "right";
+          ctx.font = "18px ui-sans-serif, system-ui, sans-serif";
+          ctx.letterSpacing = "0.24em";
+          ctx.fillStyle = "#9399b2";
+          ctx.fillText("XIREACTOR.COM/BRILLIANT", rx, H - 80);
+          ctx.letterSpacing = "0px";
+
+          // Counts: bold numbers + dim units, right-aligned
+          const segs = [
+            { t: String(nodes.length), bold: true },
+            { t: " entries · ", bold: false },
+            { t: String(links.length), bold: true },
+            { t: " links", bold: false },
+          ];
+          let totalW = 0;
+          segs.forEach((s) => {
+            ctx.font = s.bold ? "600 24px ui-sans-serif, system-ui, sans-serif" : "24px ui-sans-serif, system-ui, sans-serif";
+            s.w = ctx.measureText(s.t).width;
+            totalW += s.w;
+          });
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          let cxr = rx - totalW;
+          segs.forEach((s) => {
+            ctx.font = s.bold ? "600 24px ui-sans-serif, system-ui, sans-serif" : "24px ui-sans-serif, system-ui, sans-serif";
+            ctx.fillStyle = s.bold ? "#f0f0ff" : "#cdd6f4";
+            ctx.fillText(s.t, cxr, H - 44);
+            cxr += s.w;
+          });
+
+          ctx.restore();
+        }
+
+        window.__downloadShot = () => {
+          const renderer = graph.renderer();
+          const scene = graph.scene();
+          const camera = graph.camera();
+
+          // Save current size + aspect
+          const origW = renderer.domElement.width;
+          const origH = renderer.domElement.height;
+          const origAspect = camera.aspect;
+          const origPixelRatio = renderer.getPixelRatio();
+
+          // Render scene at 4:3 capture resolution (offscreen, no DOM reflow because updateStyle=false)
+          renderer.setPixelRatio(1);
+          renderer.setSize(SHOT_W, SHOT_H, false);
+          camera.aspect = SHOT_W / SHOT_H;
+          camera.updateProjectionMatrix();
+          renderer.render(scene, camera);
+
+          // Composite onto a 2D canvas: gradient bg → WebGL frame → vignette → branded chrome
+          const out = document.createElement("canvas");
+          out.width = SHOT_W;
+          out.height = SHOT_H;
+          const ctx = out.getContext("2d");
+
+          const cx = SHOT_W / 2, cy = SHOT_H / 2;
+          const rad = Math.max(SHOT_W, SHOT_H) / 1.4;
+          const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+          bg.addColorStop(0.0, "#1e1e2e");
+          bg.addColorStop(0.55, "#15151f");
+          bg.addColorStop(1.0, "#0a0a12");
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, SHOT_W, SHOT_H);
+
+          ctx.drawImage(renderer.domElement, 0, 0, SHOT_W, SHOT_H);
+
+          // Soft vignette to match CSS #stage::after
+          const vg = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+          vg.addColorStop(0.55, "rgba(0,0,0,0)");
+          vg.addColorStop(1.0, "rgba(0,0,0,0.55)");
+          ctx.fillStyle = vg;
+          ctx.fillRect(0, 0, SHOT_W, SHOT_H);
+
+          drawChrome(ctx, SHOT_W, SHOT_H);
+
+          // Restore renderer to on-screen size + re-render so the live view doesn't flicker
+          renderer.setPixelRatio(origPixelRatio);
+          renderer.setSize(origW / origPixelRatio, origH / origPixelRatio, false);
+          camera.aspect = origAspect;
+          camera.updateProjectionMatrix();
+          renderer.render(scene, camera);
+
+          out.toBlob((blob) => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.download = `brilliant-graph-${new Date().toISOString().slice(0, 10)}.png`;
+            link.href = url;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }, "image/png");
+        };
+
+        const controls = graph.controls();
+        if (controls && controls.addEventListener) {
+          controls.addEventListener("start", nudgePause);
+        }
+        document.getElementById("graph").addEventListener("wheel", nudgePause, { passive: true });
+
+        function tick(ts) {
+          const dt = ts - lastTs;
+          lastTs = ts;
+          if (rotating) {
+            angle += angularSpeed * dt;
+            const c = graph.cameraPosition();
+            const r = Math.hypot(c.x, c.z) || initialZ;
+            graph.cameraPosition(
+              { x: Math.sin(angle) * r, y: c.y, z: Math.cos(angle) * r },
+              undefined,
+              0
+            );
+          }
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+
+        const resize = () => graph.width(window.innerWidth).height(window.innerHeight);
+        window.addEventListener("resize", resize);
+        resize();
+
+        return {
+          destroy() {
+            rotating = false;
+            if (resumeTimer) clearTimeout(resumeTimer);
+            window.removeEventListener("resize", resize);
+            if (graph._destructor) graph._destructor();
+          },
+        };
+      }
+
+      // ----- Go -----
+      wireControls();
+      wireActionButtons();
+      const data = __GRAPH_DATA_JSON__;
+      // Spinner stays visible until refitCameraTo90thPercentile() fires on engine stop
+      // (or its 6s fallback) — gives the user a single clean reveal at the framed pose.
+      if (!data.nodes || data.nodes.length === 0) {
+        showNotice(
+          "Graph not ready.",
+          "Refresh in 30 seconds."
+        );
+      } else {
+        const prepared = prepareData(data);
+        document.getElementById("graph").innerHTML = "";
+        render3D(prepared);
+      }
+    </script>
+  </body>
+</html>

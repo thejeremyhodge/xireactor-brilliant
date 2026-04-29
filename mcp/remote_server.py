@@ -162,7 +162,9 @@ class _BasicAuthTokenBodyBridge:
 # Configuration
 # ---------------------------------------------------------------------------
 
-MCP_PORT = int(os.environ.get("MCP_PORT", "8001"))
+# Render injects $PORT and expects the service to bind it; MCP_PORT is kept
+# for compose / local-dev (and as the ultimate fallback). PORT wins on Render.
+MCP_PORT = int(os.environ.get("PORT") or os.environ.get("MCP_PORT", "8001"))
 _RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
 _MCP_BASE_URL_RAW = os.environ.get("MCP_BASE_URL", "").strip()
 
@@ -670,6 +672,15 @@ mcp.settings.debug = False
 # attacker can't burn a legitimate tx by replaying with a bad sig. A
 # legitimate user who hit 400 can only reach this handler again via a
 # fresh /oauth/login POST, which re-computes the sig anyway.
+
+
+@mcp.custom_route("/", methods=["GET", "HEAD"])
+async def _root_health(request: Request) -> Response:
+    # Render's port-detector + continuous health probe issues HEAD /. Without
+    # a handler here FastMCP's streamable_http_app returns 404, which Render
+    # treats as unhealthy and tears the container down ~60s after going live
+    # (no auto-restart). 200 OK keeps the deploy healthy.
+    return PlainTextResponse("ok")
 
 
 @mcp.custom_route("/oauth/continue", methods=["GET"])

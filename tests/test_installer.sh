@@ -443,4 +443,211 @@ echo "[smoke] tearing down headless-with-admin stack"
 docker compose down -v 2>/dev/null || true
 
 echo "[smoke] headless-with-admin scenario PASS"
+
+# ─────────────────────────────────────────────────────────────────────
+# Desktop-smoke scenario (Sprint 0045 T-0264.7, gap #15 from ST-0209)
+#
+# Single-scenario regression guard for the whole T-0264 surface. Proves
+# the full local-desktop onboarding chain is intact after a headless-
+# with-admin install:
+#
+#   1. Installer ran the headless-with-admin path → minted the admin
+#      user, wrote ADMIN_* and BRILLIANT_SERVICE_API_KEY to .env.
+#   2. `./claude-desktop-snippet.json` exists (T-0264.5/.6 path).
+#   3. The snippet parses, has the expected mcp-remote shape, and the
+#      client_info embedded under --static-oauth-client-info carries
+#      non-placeholder client_id + client_secret.
+#   4. An authenticated curl against the stack succeeds — exercising
+#      the api-inbound-auth + service-key chain that T-0264.1-.4 wired.
+#
+# Layered diagnostic map (if this scenario goes red, the failure mode
+# tells you which gap regressed):
+#
+#   FAIL on missing ./claude-desktop-snippet.json
+#     → T-0264.5 (/credentials/claude-desktop-snippet endpoint) or
+#       T-0264.6 (install.sh fetch_claude_desktop_snippet) regressed.
+#
+#   FAIL on snippet.mcpServers.brilliant-local missing / shape wrong
+#     → T-0264.5 (endpoint response shape) regressed.
+#
+#   FAIL on placeholder client_id/client_secret ("<client_id>" etc.)
+#     → OAuth client seeding broken; /setup did not mint real creds.
+#
+#   FAIL on BRILLIANT_SERVICE_API_KEY empty in .env
+#     → T-0264.2 reverted. This pre-check names the missing env
+#       explicitly so operators don't have to read container logs.
+#
+#   FAIL on authenticated /credentials returning 401/403/500
+#     → T-0264.1 (OAuth scope) or T-0264.3 (Bearer header wiring) or
+#       T-0264.4 (mcp→api:8000 connectivity) regressed. With the admin
+#       bearer key present, a 200 here means the inbound auth path and
+#       service-key chain are both healthy end-to-end.
+#
+# We do NOT spin up a bash MCP client — session_init is not trivially
+# callable without the MCP SDK. The authenticated curl to /credentials
+# is the equivalent-ish proof: it's the endpoint install.sh itself
+# polls on the headless path, uses the same admin Bearer contract, and
+# requires the full api-inbound-auth chain to function.
+# ─────────────────────────────────────────────────────────────────────
+
+echo "[smoke] desktop-smoke scenario: tearing down headless-with-admin stack"
+docker compose down -v 2>/dev/null || true
+rm -f ./.env ./install.log ./brilliant-credentials.txt ./claude-desktop-snippet.json 2>/dev/null || true
+
+DESKTOP_SUMMARY_FILE="/tmp/brilliant-smoke-desktop-summary.$$.txt"
+desktop_cleanup() {
+  rm -f "$DESKTOP_SUMMARY_FILE" ./claude-desktop-snippet.json 2>/dev/null || true
+}
+# Chain: desktop cleanup → headless cleanup → non-collision cleanup → conflict cleanup → baseline cleanup.
+trap 'desktop_cleanup; headless_cleanup; noncollision_cleanup; conflict_cleanup; cleanup' EXIT
+
+echo "[smoke] running ./install.sh --admin-email desktop@example.com --admin-password TestPass123 (desktop-smoke)"
+# Sprint 0045 T-0264.7 — the headless-with-admin path is the one that
+# triggers fetch_claude_desktop_snippet (install.sh phase 8). Default
+# browser-ceremony path does not auto-write the snippet, so we reuse
+# the headless path here with a distinct admin email.
+./install.sh \
+  --admin-email desktop@example.com \
+  --admin-password TestPass123 \
+  --force \
+  | tee "$DESKTOP_SUMMARY_FILE"
+
+echo "[smoke] pre-check: .env has BRILLIANT_SERVICE_API_KEY (T-0264.2 revert guard)"
+# Explicit revert-of-T-0264.2 probe: if the service key is missing/empty,
+# mcp→api outbound calls will 401. Name the missing env so the failure is
+# self-diagnosing rather than cascading into a less obvious /credentials 500.
+if ! grep -Eq '^BRILLIANT_SERVICE_API_KEY=.+' ./.env; then
+  echo "[smoke] FAIL: BRILLIANT_SERVICE_API_KEY missing or empty in .env — T-0264.2 regressed" >&2
+  echo "[smoke] .env secret lines:" >&2
+  grep -E '^(BRILLIANT_SERVICE_API_KEY|ADMIN_API_KEY|OAUTH_HANDOFF_SECRET)=' ./.env >&2 || true
+  exit 50
+fi
+
+echo "[smoke] asserting ./claude-desktop-snippet.json was auto-written (T-0264.5/.6)"
+if [ ! -f ./claude-desktop-snippet.json ]; then
+  echo "[smoke] FAIL: ./claude-desktop-snippet.json was not written by the installer" >&2
+  echo "[smoke] desktop banner (tail):" >&2
+  tail -n 40 "$DESKTOP_SUMMARY_FILE" >&2 || true
+  exit 51
+fi
+
+echo "[smoke] asserting snippet file is mode 600"
+# Cross-platform mode check: GNU stat uses -c, BSD stat uses -f.
+snippet_mode="$(stat -c '%a' ./claude-desktop-snippet.json 2>/dev/null || stat -f '%Lp' ./claude-desktop-snippet.json)"
+if [ "$snippet_mode" != "600" ]; then
+  echo "[smoke] FAIL: snippet file mode is $snippet_mode, expected 600" >&2
+  exit 52
+fi
+
+echo "[smoke] parsing snippet JSON (python3, no new deps)"
+# Parse + assert in a single python3 invocation. Emits a structured error
+# on the first failing assertion so the bash caller can surface it and
+# exit with a distinct code. Exit 0 on success, non-zero otherwise.
+#
+# Assertions:
+#   1. Top-level mcpServers.brilliant-local exists.
+#   2. args is a list containing "-y", "mcp-remote", an MCP URL ending
+#      in /mcp, and "--static-oauth-client-info" followed by a JSON
+#      string payload.
+#   3. The MCP URL looks like http://localhost:<port>/mcp (desktop-smoke
+#      runs against a local stack; the /mcp suffix is enforced by
+#      api/routes/setup.py::_mcp_url_for_display).
+#   4. The static-oauth-client-info JSON parses and has non-empty
+#      client_id + client_secret that are NOT placeholder strings like
+#      "<client_id>" or "<client_secret>".
+if ! python3 - ./claude-desktop-snippet.json <<'PYCHECK'
+import json, re, sys
+
+path = sys.argv[1]
+with open(path) as fh:
+    d = json.load(fh)
+
+servers = d.get("mcpServers") or {}
+entry = servers.get("brilliant-local")
+if not entry:
+    print("snippet missing mcpServers.brilliant-local", file=sys.stderr); sys.exit(2)
+
+args = entry.get("args") or []
+if not isinstance(args, list):
+    print("snippet args is not a list", file=sys.stderr); sys.exit(3)
+
+# Locate MCP URL: the arg that matches http(s)://.../mcp.
+mcp_urls = [a for a in args if isinstance(a, str) and re.match(r"^https?://[^ ]+/mcp$", a)]
+if not mcp_urls:
+    print("snippet args missing /mcp URL; got: %r" % (args,), file=sys.stderr); sys.exit(4)
+mcp_url = mcp_urls[0]
+
+# desktop-smoke runs against local dev — enforce localhost host.
+if not re.match(r"^http://localhost:\d+/mcp$", mcp_url):
+    print("snippet MCP URL is not http://localhost:<port>/mcp: %r" % mcp_url, file=sys.stderr); sys.exit(5)
+
+# --static-oauth-client-info flag + JSON payload must both be present.
+if "--static-oauth-client-info" not in args:
+    print("snippet args missing --static-oauth-client-info flag", file=sys.stderr); sys.exit(6)
+
+flag_idx = args.index("--static-oauth-client-info")
+if flag_idx + 1 >= len(args):
+    print("snippet args: --static-oauth-client-info has no payload", file=sys.stderr); sys.exit(7)
+payload_raw = args[flag_idx + 1]
+
+try:
+    client_info = json.loads(payload_raw)
+except Exception as exc:
+    print("snippet client_info payload is not valid JSON: %s" % exc, file=sys.stderr); sys.exit(8)
+
+client_id = client_info.get("client_id")
+client_secret = client_info.get("client_secret")
+if not client_id or not isinstance(client_id, str):
+    print("snippet client_info.client_id is missing or not a string", file=sys.stderr); sys.exit(9)
+if not client_secret or not isinstance(client_secret, str):
+    print("snippet client_info.client_secret is missing or not a string", file=sys.stderr); sys.exit(10)
+
+# Reject obvious placeholders. If these ever ship to real users we want
+# a loud failure in CI, not a silent mcp-remote handshake error.
+placeholder_patterns = ("<", "placeholder", "example", "changeme", "TODO")
+for name, val in (("client_id", client_id), ("client_secret", client_secret)):
+    low = val.lower()
+    if any(p in low for p in placeholder_patterns):
+        print("snippet client_info.%s looks like a placeholder: %r" % (name, val), file=sys.stderr); sys.exit(11)
+
+# Everything green — emit a compact summary the bash layer can show.
+print("ok mcp_url=%s client_id=%s..." % (mcp_url, client_id[:8]))
+PYCHECK
+then
+  echo "[smoke] FAIL: snippet JSON did not satisfy shape/content assertions" >&2
+  echo "[smoke] snippet contents:" >&2
+  cat ./claude-desktop-snippet.json >&2 || true
+  exit 53
+fi
+
+echo "[smoke] extracting admin_api_key for authenticated probe"
+desktop_key="$(grep '^admin_api_key=' ./brilliant-credentials.txt | cut -d= -f2)"
+if [ -z "$desktop_key" ]; then
+  echo "[smoke] FAIL: admin_api_key missing in ./brilliant-credentials.txt" >&2
+  exit 54
+fi
+
+echo "[smoke] authenticated GET /credentials (proves api-inbound-auth + service-key chain)"
+# This is the "equivalent-ish" session_init probe: /credentials is
+# admin-gated, uses the same Bearer contract as the MCP→API service-
+# key path, and is the endpoint install.sh itself polls on the
+# headless path. A 200 here means:
+#   - T-0264.1 OAuth scope handshake is healthy (admin user exists).
+#   - T-0264.2 BRILLIANT_SERVICE_API_KEY is present in .env (pre-check above).
+#   - T-0264.3 Bearer headers round-trip through the api container.
+#   - T-0264.4 mcp→api connectivity is reachable (compose networking).
+desktop_code="$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer ${desktop_key}" \
+  "${API_URL}/credentials")"
+if [ "$desktop_code" != "200" ]; then
+  echo "[smoke] FAIL: /credentials returned ${desktop_code}, expected 200 (desktop-smoke)" >&2
+  echo "[smoke] recent compose logs (api tail):" >&2
+  docker compose logs --tail 80 api >&2 2>/dev/null || true
+  exit 55
+fi
+
+echo "[smoke] tearing down desktop-smoke stack"
+docker compose down -v 2>/dev/null || true
+
+echo "[smoke] desktop-smoke scenario PASS"
 echo "[smoke] PASS (all scenarios)"
