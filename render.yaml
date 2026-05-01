@@ -44,6 +44,13 @@ services:
     runtime: docker
     plan: starter
     region: virginia
+    # autoDeploy: false — Brilliant's API contract is coupled to the locally
+    # installed Claude skill bundle on each operator's machine. Auto-deploying
+    # every push to the tracked branch can introduce MCP tool/contract changes
+    # that the user's skill hasn't picked up yet, silently breaking their setup.
+    # Operators trigger "Manual Deploy" from the Render dashboard *after*
+    # updating their skill bundle to a compatible version.
+    autoDeploy: false
     dockerfilePath: ./api/Dockerfile
     dockerContext: .
     # NO `dockerCommand:` — Render's parser wraps the value in literal
@@ -136,6 +143,9 @@ services:
     runtime: docker
     plan: starter
     region: virginia
+    # autoDeploy: false — see brilliant-api above. MCP tool surface is the
+    # contract the Claude skill calls; auto-deploys can break skill compatibility.
+    autoDeploy: false
     dockerfilePath: ./mcp/Dockerfile
     dockerContext: ./mcp
     # Dockerfile CMD `python remote_server.py` is fine for production —
