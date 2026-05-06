@@ -204,6 +204,8 @@ _route_modules = [
     ("routes.analytics", "router", "/analytics"),
     # Setup ceremony — empty prefix keeps /setup at the root.
     ("routes.setup", "router", ""),
+    # Version handshake (Sprint 0048) — empty prefix keeps /version at root.
+    ("routes.version", "router", ""),
     # OAuth tx-handoff login page (Sprint 0039). Prefix yields /oauth/login.
     ("routes.oauth", "router", "/oauth"),
 ]

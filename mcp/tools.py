@@ -33,6 +33,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
 from client import BrilliantClient
+from _version import build_get_version_payload
 
 # Locate the shared vault-walking helpers (`tools/vault_parse.py`). Used by
 # the `import_vault(path)` MCP tool so we don't duplicate the walker logic.
@@ -97,6 +98,39 @@ def _resolve_act_as_user_id() -> str | None:
 
 def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
     """Register all Brilliant tools on the given FastMCP server instance."""
+
+    # -------------------------------------------------------------------
+    # Version handshake (Sprint 0048) — first tool the skill calls on
+    # session start. Exempt from act_as=user_id by design: versions are
+    # public, and the skill must perform the handshake BEFORE OAuth
+    # binding completes on a fresh session.
+    # -------------------------------------------------------------------
+
+    @mcp.tool()
+    async def get_version() -> dict:
+        """Return API + MCP versions and skill compatibility metadata.
+
+        The Brilliant skill calls this on every session start to decide
+        whether to proceed silently, surface an upgrade-available banner,
+        or refuse with an incompatibility message. See ``skill/SKILL.md``
+        section "Session Start: Version Check".
+
+        This tool is intentionally exempt from the ``act_as=user_id``
+        requirement — version info is public and the handshake runs
+        before OAuth binding completes.
+
+        Returns seven fields:
+          api_version          — the API service's reported version
+                                 (None if API is unreachable)
+          mcp_version          — this MCP service's version
+          min_skill_version    — oldest skill version the API accepts
+          latest_skill_version — newest skill version published
+          skill_download_url   — where to grab a fresh skill bundle
+          api_url              — the API URL this MCP dialed
+          api_unreachable      — true when the API call failed; the
+                                 other API-sourced fields are then None
+        """
+        return await build_get_version_payload(api)
 
     # -------------------------------------------------------------------
     # Read tools

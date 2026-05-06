@@ -1,6 +1,7 @@
 ---
 name: brilliant-kb-assistant
 description: xiReactor Brilliant Knowledge Base assistant — manages sessions, daily notes, content routing, search, browsing, governance, and meeting intelligence via MCP. Use when the user asks about organizational knowledge, needs to look something up, wants to create or update KB content, says "resume", "compress", "daily", "search", or when you need institutional context.
+skill_version: 0.7.0
 ---
 
 # Brilliant Knowledge Base Assistant
@@ -15,6 +16,27 @@ Use this skill to:
 - Create new entries or propose changes to existing content
 - Explore how knowledge relates across the organization
 - Maintain daily session logs and institutional memory
+
+## Session Start: Version Check
+
+**Before any other Brilliant action on a fresh session**, call the `get_version` MCP tool. The response carries seven fields; the three you compare are `min_skill_version`, `latest_skill_version`, and this skill's own `skill_version` (declared in the frontmatter at the top of this file — currently **0.7.0**).
+
+Three outcomes — pick exactly one:
+
+1. **`skill_version >= latest_skill_version`** (you are current, or ahead) → proceed silently. Continue to the Brilliant-Anchor inbox flow as normal. Do not mention versions to the user.
+
+2. **`min_skill_version <= skill_version < latest_skill_version`** (compatible, but a newer skill exists) → surface a single one-line banner once, then continue normally:
+   > ℹ️ A newer Brilliant skill is available (v{latest_skill_version} → you have v{skill_version}). Update when convenient: {skill_download_url}.
+
+3. **`skill_version < min_skill_version`** (incompatible — refuse) → do not call any other Brilliant MCP tool. Tell the user verbatim, substituting the values from the response:
+   > ⚠️ Your Brilliant skill (v{skill_version}) is incompatible with the API (v{api_version}, requires skill ≥ v{min_skill_version}). Update at {skill_download_url} before continuing.
+   Then stop. Do not attempt the inbox flow, `session_init`, or any other Brilliant call until the user confirms they have updated.
+
+If `get_version` returns `api_unreachable: true` (the MCP could not reach the API), surface a brief warning to the user and proceed cautiously — the API may be mid-deploy. Do not refuse outright on unreachable, only on a confirmed `skill_version < min_skill_version`.
+
+The version-check runs **once per session**, at the very start. After it succeeds (or surfaces a banner), do not re-run it within the same session.
+
+---
 
 ## Brilliant-Anchor Workflow
 

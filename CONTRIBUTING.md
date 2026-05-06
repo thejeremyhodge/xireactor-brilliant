@@ -104,6 +104,51 @@ File issues at [github.com/thejeremyhodge/xireactor-brilliant/issues](https://gi
 - **Features:** Describe the use case, not just the solution
 - **Questions:** Ask away — no issue is too basic
 
+## Cutting a release
+
+The Sprint 0048 version handshake means four version strings now travel together. Release cuts must bump them in lockstep, otherwise the skill's session-start handshake either falsely refuses on a fresh install (over-bumped `MIN_SKILL_VERSION`) or misses a real incompatibility (under-bumped).
+
+**The four strings:**
+- `api/_version.py::API_VERSION` — current API release
+- `api/_version.py::LATEST_SKILL_VERSION` — newest skill bundle published
+- `api/_version.py::MIN_SKILL_VERSION` — oldest skill bundle that can still talk to this API
+- `mcp/_version.py::MCP_VERSION` — MCP service version (kept identical to `API_VERSION`; lives in `mcp/` because the MCP container is built with `dockerContext: ./mcp` and can't import from `api/`)
+- `skill/SKILL.md` frontmatter `skill_version` — the bundle's self-reported version
+
+**Procedure:**
+1. Pick the new version per [SemVer 2.0](https://semver.org/spec/v2.0.0.html) (patch / minor / major).
+2. Bump `API_VERSION` in `api/_version.py`.
+3. Bump `LATEST_SKILL_VERSION` in `api/_version.py` to match `API_VERSION` — every release ships a fresh skill bundle.
+4. Decide whether to bump `MIN_SKILL_VERSION` (see criteria below). When in doubt, **don't bump** — spurious refusals are worse than a missing warning.
+5. Bump `MCP_VERSION` in `mcp/_version.py` to match `API_VERSION`.
+6. Bump `skill_version` in `skill/SKILL.md` frontmatter to match `API_VERSION`.
+7. Re-zip the skill bundle with explicit paths (macOS zip 3.0 silently drops files when given a directory wildcard — see the relevant feedback memory):
+   ```bash
+   cd skill && zip -FS brilliant-kb-assistant.zip SKILL.md references/api-reference.md
+   ```
+8. Add a `## [x.y.z] — YYYY-MM-DD — <headline>` entry to `CHANGELOG.md` summarising what changed.
+9. Squash-merge `dev` → `main`, tag `vx.y.z`, and `gh release create vx.y.z` (the GHCR image publish + shields.io release badge both depend on the GitHub Release object, not just the tag).
+
+### When to bump `MIN_SKILL_VERSION`
+
+This is the load-bearing decision in the dance. Bump it **only** when an older skill literally cannot work against the new API:
+
+**Bump it when:**
+- An MCP tool was removed or renamed.
+- A required argument was added to an MCP tool (older skills will call without it and get a 422).
+- A response shape that the skill parses changed (field renamed, removed, or restructured).
+- An API route the skill calls was removed or moved.
+- The auth header contract changed (e.g. new required header, format change).
+
+**Don't bump it when:**
+- New tools or routes were added (older skills simply don't call them).
+- Internal refactors with no observable behaviour change.
+- Performance improvements.
+- Bug fixes that don't change the response shape or status codes.
+- Docstring / comment / cosmetic changes.
+
+A bumped `MIN_SKILL_VERSION` immediately turns into hard refusals for every operator running an older skill until they update — treat it as a breaking change and call it out loudly in the CHANGELOG entry.
+
 ## For Maintainers
 
 Maintainers of this repository may keep additional local directories alongside the tracked source — planning and operational notes, marketing-site sources, research scratch, and tooling configuration. These live in the working tree but are excluded via `.gitignore` and never pushed. They exist only to keep the maintainer's day-to-day workflow in one place.

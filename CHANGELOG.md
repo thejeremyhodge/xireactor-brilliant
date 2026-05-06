@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-05 — Skill ↔ API version handshake
+
+### Added
+- **`[feature]` Sprint 0048 — version handshake** — new `GET /version` endpoint exposes `api_version`, `min_skill_version`, `latest_skill_version`, and `skill_download_url` (no auth, `Cache-Control: no-cache`) so the skill can determine compatibility on every session start. New MCP `get_version` tool merges the API response with the MCP's own version + dialed API URL and degrades gracefully (`api_unreachable: true`) if the API is mid-deploy. SKILL.md gains a `skill_version` frontmatter field and a "Session Start: Version Check" section with a three-outcome decision tree (silent / upgrade banner / hard refusal). Companion safety net for the `autoDeploy: false` posture shipped in v0.6.1: operators now get an actionable upgrade signal even though deploys no longer auto-roll. `CONTRIBUTING.md` documents the release-cut version-bump dance, including the load-bearing decision of when to bump `MIN_SKILL_VERSION`. (T-0276, T-0277, T-0278, T-0279; spec `.xireactor/specs/0048--2026-05-01--version-handshake.md`)
+
+
 ### Added
 - **`[feature][docs]` Sprint 0040b — browser vault upload (MCP-bypass onboarding path)** — first-class `/import/vault` HTML page + `POST /import/vault-upload` multipart endpoint that lets authenticated users push a vault tarball straight from their browser to the API, bypassing Claude's ~32K-token per-turn output cap, the Co-work bash sandbox outbound allowlist, and the MCP protocol entirely. Reuses the Sprint 0040 `_execute_import` + `iter_tarball_md` pipeline unchanged; renders `{created, staged, batch_id}` counts inline with the rollback command on success. Cross-linked from `/setup` so first-run flows naturally into vault seeding. SKILL.md rewritten to direct remote-MCP agents at the browser page instead of attempting base64-over-MCP for real vaults — the 0040a inline-bytes path stays as a small-vault / local-stdio fallback. README quickstart points first-time users at `https://<your-host>/import/vault`. (T-0245, T-0246, T-0247, T-0248, T-0249; spec `.xireactor/specs/0040b--2026-04-19--browser-vault-upload.md`)
 
