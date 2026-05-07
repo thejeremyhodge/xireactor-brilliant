@@ -228,3 +228,149 @@ def test_session_init_shape_stable_for_current_kb():
         assert m["tags_top"] == []
         assert m["system_entries"] == []
         assert m["last_updated"] is None
+
+
+# ---------------------------------------------------------------------------
+# Sprint 0049 — manifest_version negotiation
+#
+# These cases lock the version-handshake contract. Full v2 payload coverage
+# (structural / heat / motifs assertions) lives in T-0285; here we only
+# verify negotiation: default = v1, explicit v2 layers on top, unknown
+# version → 400 with a clear error.
+# ---------------------------------------------------------------------------
+
+
+def test_session_init_default_is_v1_no_version_marker():
+    """No version requested → v1 shape, NO `manifest_version` key."""
+    r = requests.get(
+        f"{BASE_URL}/session-init",
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["manifest"]
+    # v1 must NOT carry a manifest_version marker (byte-identical to pre-0049).
+    assert "manifest_version" not in m
+    # And none of the v2-only blocks may leak in.
+    assert "structural" not in m
+    assert "heat" not in m
+    assert "motifs" not in m
+
+
+def test_session_init_explicit_v2_via_query_param():
+    """`?manifest_version=2` returns v1 keys plus structural/heat/motifs."""
+    r = requests.get(
+        f"{BASE_URL}/session-init?manifest_version=2",
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["manifest"]
+    assert m.get("manifest_version") == 2
+    # All v1 keys still present.
+    for key in (
+        "total_entries",
+        "last_updated",
+        "user",
+        "categories",
+        "top_paths",
+        "tags_top",
+        "system_entries",
+        "pending_reviews",
+        "hints",
+    ):
+        assert key in m, f"v2 must preserve v1 key {key!r}"
+    # And the three new top-level blocks exist.
+    assert "structural" in m
+    assert "heat" in m
+    assert "motifs" in m
+
+
+def test_session_init_explicit_v2_via_header():
+    """Header `X-Manifest-Version: 2` is equivalent to the query param."""
+    headers = _headers()
+    headers["X-Manifest-Version"] = "2"
+    r = requests.get(
+        f"{BASE_URL}/session-init",
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["manifest"]
+    assert m.get("manifest_version") == 2
+    assert "structural" in m
+
+
+def test_session_init_unsupported_version_returns_400():
+    """Unknown version → 400 with message naming supported versions."""
+    r = requests.get(
+        f"{BASE_URL}/session-init?manifest_version=99",
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert r.status_code == 400, r.text
+    body = r.json()
+    detail = json.dumps(body)
+    assert "99" in detail
+    assert "1" in detail and "2" in detail, (
+        f"error must enumerate supported versions, got: {detail}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 0049 — RLS scoping for v2 manifest aggregates (T-0285)
+#
+# The v2 manifest exposes corpus-level aggregates (structural, heat, motifs).
+# Aggregates are computed per RLS-scoped connection, so different roles see
+# different `total_entries` counts and different aggregate values. We can't
+# audit the LOD4 silhouette here (that lives in test_lod.py) but we can lock
+# down the contract that aggregates ARE per-role — i.e. an agent's manifest
+# does not expose admin-only counts.
+# ---------------------------------------------------------------------------
+
+
+AGENT_KEY = "bkai_agnt_testkey_agent"
+
+
+def test_session_init_v2_aggregates_are_rls_scoped_per_role():
+    """Admin and agent see byte-divergent v2 manifests when admin-private
+    rows exist. We don't assert exact numbers (the fixture KB drifts) — we
+    assert the roles see DIFFERENT structural totals when at least one
+    admin-private entry exists OR (in the fresh-KB case) the agent's
+    total_entries does not exceed admin's.
+    """
+    admin = requests.get(
+        f"{BASE_URL}/session-init?manifest_version=2",
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    agent = requests.get(
+        f"{BASE_URL}/session-init?manifest_version=2",
+        headers=_headers(AGENT_KEY),
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert admin.status_code == 200, admin.text
+    assert agent.status_code == 200, agent.text
+
+    am = admin.json()["manifest"]
+    gm = agent.json()["manifest"]
+
+    # Both still tagged with the v2 marker.
+    assert am.get("manifest_version") == 2
+    assert gm.get("manifest_version") == 2
+
+    # The agent role is read-restricted (sensitivity ceiling = `shared`),
+    # so total_entries from agent's RLS view can NEVER exceed admin's. If
+    # this assertion fails it means RLS is not being applied to the
+    # session-init aggregate path.
+    assert gm["total_entries"] <= am["total_entries"], (
+        f"agent total_entries ({gm['total_entries']}) "
+        f"exceeds admin's ({am['total_entries']}) — RLS bypass"
+    )
+
+    # Same invariant for structural edges — agent must not see more edges
+    # than admin (edges count rows the caller can SELECT).
+    if "structural" in am and "structural" in gm:
+        assert gm["structural"].get("edges", 0) <= am["structural"].get("edges", 0), (
+            "agent's structural.edges exceeds admin's — RLS bypass on entry_links"
+        )

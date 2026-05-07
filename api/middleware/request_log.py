@@ -38,12 +38,21 @@ def _resolve_endpoint(request: Request) -> str:
     When FastAPI/Starlette has matched a route, `request.scope["route"]` is
     a `starlette.routing.Route` with `.path` = "/entries/{entry_id}". This
     is preferable to the raw URL so IDs don't explode cardinality.
+
+    Handlers may override this by stashing `request.state.log_endpoint` —
+    e.g. the `/lod` handler appends `?axis=…&level=…` so the
+    get_lod-vs-search_entries ratio is recoverable from request_log without
+    adding a query-string column or a metadata JSONB. See docs/OBSERVABILITY.md.
     """
-    route = request.scope.get("route")
-    if isinstance(route, Route):
-        path = route.path
+    override = getattr(request.state, "log_endpoint", None)
+    if isinstance(override, str) and override:
+        path = override
     else:
-        path = request.url.path
+        route = request.scope.get("route")
+        if isinstance(route, Route):
+            path = route.path
+        else:
+            path = request.url.path
     if len(path) > _MAX_ENDPOINT_LEN:
         path = path[:_MAX_ENDPOINT_LEN]
     return path

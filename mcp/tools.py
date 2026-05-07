@@ -246,6 +246,22 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         return await api.get("/index", params=params, act_as=user_id)
 
     @mcp.tool()
+    async def get_lod(
+        axis: str,
+        scope: str = "corpus",
+        level: int = 0,
+    ) -> dict:
+        """Fetch a level-of-detail map of the KB along a structural or heat axis.
+
+        Wraps ``GET /lod``. Levels: 0 corpus map, 1 community-by-tag/path,
+        2 community silhouette, 4 node silhouette (``scope=node:<id>``),
+        6 section outline (``scope=node:<id>``).
+        """
+        user_id = _resolve_act_as_user_id()
+        params: dict = {"axis": axis, "scope": scope, "level": level}
+        return await api.get("/lod", params=params, act_as=user_id)
+
+    @mcp.tool()
     async def get_types() -> dict:
         """List all registered content types in the knowledge base.
 

@@ -25,14 +25,22 @@ New shape (v0.4.0 breaking change, + `tags_top` in v0.4.1):
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from psycopg.rows import dict_row
 
 from auth import UserContext, get_current_user
 from database import get_db
+from services import lod as lod_service
+from services.motifs import count_motifs
 
 router = APIRouter(tags=["session"])
+
+# Manifest versions supported by this endpoint. v1 is the byte-stable
+# pre-Sprint-0049 shape; v2 layers structural / heat / motifs blocks on top
+# without removing any v1 keys (skill clients pinned to v1 see no diff).
+SUPPORTED_MANIFEST_VERSIONS: tuple[int, ...] = (1, 2)
 
 # Hard cap on top_paths rows — the agent can walk past the horizon with
 # get_index(path=...), so there is no value in dumping the long tail here.
@@ -47,6 +55,15 @@ TAGS_TOP_LIMIT = 20
 @router.get("")
 async def session_init(
     user: UserContext = Depends(get_current_user),
+    manifest_version: Optional[int] = Query(
+        None,
+        description="Manifest schema version. Supported: 1 (default), 2.",
+    ),
+    x_manifest_version: Optional[int] = Header(
+        None,
+        alias="X-Manifest-Version",
+        description="Alternative to ?manifest_version= query param.",
+    ),
 ):
     """Return a compact density manifest for agent session start.
 
@@ -58,7 +75,27 @@ async def session_init(
 
     A fresh org with zero published entries returns a well-formed manifest
     with zeroed counts and empty lists, not a crash.
+
+    Manifest version negotiation: query param wins over header; absence of
+    both → v1 (byte-identical to the pre-Sprint-0049 shape). v2 layers
+    structural / heat / motifs blocks on top without dropping any v1 key.
     """
+    # Query param wins over header (explicit beats implicit). Either may be
+    # None; fall through to default v1.
+    requested_version = manifest_version if manifest_version is not None else x_manifest_version
+    if requested_version is None:
+        requested_version = 1
+
+    if requested_version not in SUPPORTED_MANIFEST_VERSIONS:
+        supported = ", ".join(str(v) for v in SUPPORTED_MANIFEST_VERSIONS)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported manifest_version={requested_version}. "
+                f"Supported: {supported}."
+            ),
+        )
+
     async with get_db(user) as conn:
         # -------- counts + last_updated ---------------------------------
         cur = await conn.execute(
@@ -196,25 +233,52 @@ async def session_init(
         # -------- hints -------------------------------------------------
         hints = _build_hints(total, top_paths, tags_top, system_entries, pending_reviews)
 
-        return {
-            "manifest": {
-                "total_entries": total,
-                "last_updated": last_updated,
-                "user": {
-                    "id": user.id,
-                    "display_name": user.display_name,
-                    "role": user.role,
-                    "department": user.department,
-                    "source": user.source,
-                },
-                "categories": categories,
-                "top_paths": top_paths,
-                "tags_top": tags_top,
-                "system_entries": system_entries,
-                "pending_reviews": pending_reviews,
-                "hints": hints,
-            }
+        manifest: dict = {
+            "total_entries": total,
+            "last_updated": last_updated,
+            "user": {
+                "id": user.id,
+                "display_name": user.display_name,
+                "role": user.role,
+                "department": user.department,
+                "source": user.source,
+            },
+            "categories": categories,
+            "top_paths": top_paths,
+            "tags_top": tags_top,
+            "system_entries": system_entries,
+            "pending_reviews": pending_reviews,
+            "hints": hints,
         }
+
+        # v1 path: byte-identical to pre-Sprint-0049 output. No new keys,
+        # no manifest_version field. Skill clients pinned to v1 see no diff.
+        if requested_version == 1:
+            return {"manifest": manifest}
+
+        # v2 path: layer structural/heat/motifs blocks plus an explicit
+        # `manifest_version: 2` marker. Reuses the same RLS-scoped conn —
+        # all aggregates respect the caller's visibility.
+        edge_count = await lod_service.get_edge_count(conn)
+        relation_hist = await lod_service.get_relation_type_histogram(conn)
+        degree_bins = await lod_service.get_degree_bins(conn)
+        orphan_count = await lod_service.get_orphan_count(conn)
+        size_dist = await lod_service.get_size_distribution(conn)
+        heat_bands = await lod_service.get_heat_bands(conn)
+        motifs = await count_motifs(conn)
+
+        manifest["manifest_version"] = 2
+        manifest["structural"] = {
+            "edge_count": edge_count,
+            "relation_type_histogram": relation_hist,
+            "degree_bins": degree_bins,
+            "orphan_count": orphan_count,
+            "size_distribution": size_dist,
+        }
+        manifest["heat"] = heat_bands
+        manifest["motifs"] = motifs
+
+        return {"manifest": manifest}
 
 
 def _build_hints(

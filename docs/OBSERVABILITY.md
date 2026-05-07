@@ -153,6 +153,95 @@ The middleware targets **<2ms p95** under load. The insert runs in an `asyncio.c
 
 Formal load measurements are owed to the concurrency harness in a follow-up; the smoke-test numbers on a local MacBook (9–27 ms end-to-end request latency for `/entries` with logging on) left plenty of headroom.
 
+## /lod adoption (Sprint 0049 measurement scaffold)
+
+The `GET /lod` endpoint (multi-axis level-of-detail) tags each request with its
+`axis` and `level` so adoption is recoverable from `request_log` without a new
+column or a metadata JSONB. The route handler sets `request.state.log_endpoint
+= "/lod?axis=<axis>&level=<level>"`, and the request-log middleware prefers
+that override over the raw route template when present.
+
+The cardinality is bounded: `axis ∈ {structural, heat}` × `level ∈ {0, 1, 2, 4,
+6}` → at most 10 distinct endpoint labels (and a few are illegal combinations,
+so fewer in practice). This stays well below any dashboard cardinality concern
+and avoids the cost of a query-string column or a metadata JSONB.
+
+### Counts grouped by axis + level
+
+```sql
+SELECT
+  split_part(split_part(endpoint, 'axis=', 2), '&', 1) AS axis,
+  split_part(endpoint, 'level=', 2)                    AS level,
+  COUNT(*)                                              AS calls
+FROM request_log
+WHERE endpoint LIKE '/lod?%'
+  AND ts > now() - interval '24 hours'
+GROUP BY axis, level
+ORDER BY calls DESC;
+```
+
+### get_lod-vs-search_entries ratio (per day)
+
+The whole point of T-0286: did shipping `/lod` change agent behavior? If
+agents are reaching for `/lod` instead of brute-force `/search_entries` (or
+listing `/entries`) when they need shape-of-the-corpus, the ratio climbs.
+
+```sql
+WITH window AS (
+  SELECT date_trunc('day', ts) AS day,
+         CASE
+           WHEN endpoint LIKE '/lod?%'                       THEN 'lod'
+           WHEN endpoint = '/search_entries' OR endpoint LIKE '/search%'
+                                                              THEN 'search'
+           WHEN endpoint = '/entries' OR endpoint = '/kb/entries' THEN 'list'
+         END AS kind
+  FROM request_log
+  WHERE ts > now() - interval '14 days'
+)
+SELECT day,
+       COUNT(*) FILTER (WHERE kind = 'lod')                          AS lod_calls,
+       COUNT(*) FILTER (WHERE kind IN ('search', 'list'))            AS brute_calls,
+       ROUND(
+         COUNT(*) FILTER (WHERE kind = 'lod')::numeric
+         / NULLIF(COUNT(*) FILTER (WHERE kind IN ('search', 'list')), 0),
+         3
+       ) AS lod_to_brute_ratio
+FROM window
+WHERE kind IS NOT NULL
+GROUP BY day
+ORDER BY day DESC;
+```
+
+### Per-session ratio
+
+For a single agent session, scope by `actor_id` and a tighter time window
+(15-minute buckets, matching `/analytics/session-depth`):
+
+```sql
+WITH window AS (
+  SELECT actor_id,
+         date_trunc('minute', ts)
+           - (EXTRACT(MINUTE FROM ts)::int % 15) * interval '1 minute' AS bucket,
+         CASE
+           WHEN endpoint LIKE '/lod?%' THEN 'lod'
+           WHEN endpoint LIKE '/search%' OR endpoint LIKE '/entries%' THEN 'brute'
+         END AS kind
+  FROM request_log
+  WHERE actor_id = 'usr_admin'
+    AND ts > now() - interval '24 hours'
+)
+SELECT bucket,
+       COUNT(*) FILTER (WHERE kind = 'lod')   AS lod_calls,
+       COUNT(*) FILTER (WHERE kind = 'brute') AS brute_calls
+FROM window
+WHERE kind IS NOT NULL
+GROUP BY bucket
+ORDER BY bucket DESC;
+```
+
+This is the measurement promised in spec 0049 §"Measurement scaffold" /
+handoff §10 step 3: "did this change agent behavior?".
+
 ## Test coverage
 
 `tests/test_observability.py` ships 11 integration cases covering: middleware behavior, `/health` exclusion, single vs. batched inserts, graph cache interaction, viewer 403 on analytics, rollup response shapes, `since` parser, `actor_type` validation, and RLS enforcement at the psql layer. Runs against the live stack (`BASE_URL`, `DB_DSN` env-overridable).

@@ -1364,6 +1364,66 @@ The response's `content` field is now rendered, not raw:
 
 ---
 
+## MCP Tools — Multi-LOD Map
+
+### get_lod
+
+Fetch a level-of-detail (LOD) view of the knowledge base along a structural or heat axis. Wraps `GET /lod?axis=&scope=&level=` and preserves `X-Act-As-User` semantics like every other read tool.
+
+**Signature:** `get_lod(axis: str, scope: str = "corpus", level: int = 0) -> dict`
+
+**Parameters:**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `axis` | string | (required) | One of: `structural`, `heat` |
+| `scope` | string | `"corpus"` | One of: `corpus`, `community:tag:<tag>`, `community:path:<prefix>`, `node:<entry_id>` |
+| `level` | int | `0` | Supported: `0`, `1`, `2`, `4`, `6` (LOD3 / LOD5 deferred) |
+
+**Levels:**
+
+| Level | Scope shape | Returns |
+|---|---|---|
+| LOD0 | `corpus` | Corpus structural skeleton (edge counts, relation-type histogram, degree bins, orphan count, size distribution) or corpus heat bands |
+| LOD1 | `community:tag:<tag>` or `community:path:<prefix>` | Community membership stats (node count, edge count, top tags, dominant content_types) with `community_source: "tag" \| "path"` |
+| LOD2 | `community:tag:<tag>` or `community:path:<prefix>` | Community silhouette card — fixed-shape summary (counts + top-5 tags + top-3 content_types) |
+| LOD4 | `node:<entry_id>` | Node silhouette: `{id, title, tags, length, degree_in, degree_out, tag_clusters, path_cluster}` |
+| LOD6 | `node:<entry_id>` | Section outline parsed from the entry's markdown ATX headings (`# … ######`) |
+
+**Errors** surface as the standard client error dict (`{"error": True, "status": <code>, "detail": ...}`) rather than silent empty payloads — same contract as `search_entries` / `get_index`.
+
+**Example — LOD0 corpus structural map (recommended session-start call):**
+
+```python
+await get_lod(axis="structural", scope="corpus", level=0)
+```
+
+**Example — LOD1 community by tag:**
+
+```python
+await get_lod(axis="structural", scope="community:tag:project:atlas", level=1)
+```
+
+**Example — LOD2 community silhouette by folder prefix:**
+
+```python
+await get_lod(axis="structural", scope="community:path:Projects", level=2)
+```
+
+**Example — LOD4 node silhouette:**
+
+```python
+await get_lod(axis="structural", scope="node:a1b2c3d4-0000-0000-0000-000000000000", level=4)
+```
+
+**Example — LOD6 section outline of a single entry:**
+
+```python
+await get_lod(axis="structural", scope="node:a1b2c3d4-0000-0000-0000-000000000000", level=6)
+```
+
+---
+
 ## MCP Tools — Analytics
 
 ### get_usage_stats

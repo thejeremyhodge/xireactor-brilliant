@@ -191,6 +191,8 @@ _route_modules = [
     ("routes.types", "types", "/types"),
     ("routes.tags", "router", "/tags"),
     ("routes.session", "session", "/session-init"),
+    # Multi-LOD aggregate (Sprint 0049). Empty prefix keeps /lod at root.
+    ("routes.lod", "router", "/lod"),
     ("routes.invitations", "invitations", "/invitations"),
     ("routes.permissions", "entry_perms_router", "/entries"),
     ("routes.permissions", "path_perms_router", "/paths"),
