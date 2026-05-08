@@ -125,17 +125,17 @@ def _run(coro):
 
 def test_mcp_get_version_happy_path():
     api_resp = {
-        "api_version": "0.7.0",
-        "min_skill_version": "0.7.0",
-        "latest_skill_version": "0.7.0",
+        "api_version": "0.8.0",
+        "min_skill_version": "0.8.0",
+        "latest_skill_version": "0.8.0",
         "skill_download_url": SKILL_DOWNLOAD_URL,
     }
     payload = _run(build_get_version_payload(_StubClient(api_resp)))
 
-    assert payload["api_version"] == "0.7.0"
+    assert payload["api_version"] == "0.8.0"
     assert payload["mcp_version"] == MCP_VERSION
-    assert payload["min_skill_version"] == "0.7.0"
-    assert payload["latest_skill_version"] == "0.7.0"
+    assert payload["min_skill_version"] == "0.8.0"
+    assert payload["latest_skill_version"] == "0.8.0"
     assert payload["skill_download_url"] == SKILL_DOWNLOAD_URL
     assert payload["api_url"] == "https://api.example.test"
     assert payload["api_unreachable"] is False

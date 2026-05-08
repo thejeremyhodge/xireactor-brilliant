@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-07 — Multi-LOD + 3-axis + tag-triangulation
+
+### Added
+- **`[feature]` Sprint 0049 — multi-LOD endpoints** — new `GET /lod?axis=&scope=&level=` uniform endpoint serves LOD0 (corpus silhouette: structural + heat), LOD1/LOD2 (community-by-tag or community-by-path), LOD4 (node silhouette), and LOD6 (markdown section outline). New `api/services/lod.py`, `api/services/motifs.py` (tag-triangulation registry), `api/services/section_outline.py` (pure markdown heading parser, memoized for >10KB entries). `GET /session?manifest_version=2` returns the v0.4.x manifest plus `structural`, `heat`, and `motifs` blocks; v1 default is byte-identical to v0.7.0. Communities are dynamic tag-clusters (no precompute, no Louvain). Three axes framed in research, only structural + heat + tag-triangulation shipped this sprint — epistemic deferred.
+- **`[feature]` MCP `get_lod` tool** — wraps `GET /lod` with `(axis, scope, level)` signature. `api-reference.md` documents one example per LOD level.
+- **`[feature]` Skill v0.8.0 — LOD0-first session-start flow** — SKILL.md teaches agents to fetch the corpus map (`get_lod` structural + heat) before any `search_entries`, narrow scope deterministically using tag-triangulation motifs, and only descend (LOD2/4/6) once a target is identified. Skill bundle re-zipped. Triggers v0.7.0 handshake "newer skill available" banner for v0.7.0 clients; `MIN_SKILL_VERSION` stays at `0.7.0` since v0.7.0 skills work fine against the v0.8.0 API (v2 manifest is opt-in). (T-0280..T-0287; spec `.xireactor/specs/0049--2026-05-07--multi-lod-3-axis.md`)
+- **`[feature]` Measurement scaffold** — `/lod` calls log to `request_log` so we can measure the get_lod-vs-search_entries ratio per session over the next 2-3 weeks of dogfood data.
+
 ## [0.7.0] — 2026-05-05 — Skill ↔ API version handshake
 
 ### Added

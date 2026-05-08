@@ -12,7 +12,7 @@ and the ``CHANGELOG.md`` heading. Drift between this file and
 ``api/_version.py`` is the symptom of a missed step.
 """
 
-MCP_VERSION = "0.7.0"
+MCP_VERSION = "0.8.0"
 SKILL_DOWNLOAD_URL_FALLBACK = (
     "https://github.com/thejeremyhodge/xireactor-brilliant/releases/latest"
 )
