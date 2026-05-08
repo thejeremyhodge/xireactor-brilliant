@@ -40,14 +40,14 @@ jobs:
 
       - name: Write .env for docker compose
         run: |
-          cat > .env <<'EOF'
-          POSTGRES_USER=postgres
-          POSTGRES_PASSWORD=dev
-          POSTGRES_DB=cortex
-          ADMIN_EMAIL=admin@ci.local
-          ADMIN_PASSWORD=ci-placeholder-do-not-use-in-prod
-          ADMIN_API_KEY=bkai_adm1_testkey_admin
-          EOF
+          {
+            echo 'POSTGRES_USER=postgres'
+            echo 'POSTGRES_PASSWORD=dev'
+            echo 'POSTGRES_DB=cortex'
+            echo 'ADMIN_EMAIL=admin@ci.local'
+            echo 'ADMIN_PASSWORD=ci-placeholder-do-not-use-in-prod'
+            echo 'ADMIN_API_KEY=bkai_adm1_testkey_admin'
+          } > .env
 
       - name: Start stack
         run: docker compose up -d --build
@@ -76,10 +76,8 @@ jobs:
 
       - name: Validate schema (RLS + CTE)
         run: |
-          docker compose exec -T db \
-            psql -U postgres -d cortex -f /docker-entrypoint-initdb.d/../../tests/validate_schema.sql \
-            || docker compose exec -T -e PGPASSWORD=dev db \
-               psql -h localhost -U postgres -d cortex < tests/validate_schema.sql
+          docker compose exec -T -e PGPASSWORD=dev db \
+            psql -h localhost -U postgres -d cortex < tests/validate_schema.sql
 
       - name: Dump logs on failure
         if: failure()

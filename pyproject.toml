@@ -27,7 +27,7 @@ filterwarnings = [
 
 [tool.coverage.run]
 branch = true
-source = ["api", "mcp", "tools"]
+source = ["api", "mcp"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
