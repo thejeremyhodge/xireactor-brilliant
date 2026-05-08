@@ -57,23 +57,6 @@ async def _rls_insufficient_privilege_handler(
     )
 
 
-@app.exception_handler(pg_errors.CheckViolation)
-async def _rls_check_violation_handler(
-    request: Request, exc: pg_errors.CheckViolation
-) -> JSONResponse:
-    # RLS WITH CHECK predicate failed (typically writing past a sensitivity
-    # ceiling or to a resource the row-level policy disallows).
-    logger.info(
-        "RLS WITH CHECK denied %s %s; returning 403",
-        request.method,
-        request.url.path,
-    )
-    return JSONResponse(
-        status_code=403,
-        content={"detail": "This operation is not permitted by policy."},
-    )
-
-
 @app.get("/health")
 async def health():
     """Health check endpoint."""
