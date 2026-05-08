@@ -255,6 +255,8 @@ def test_session_init_default_is_v1_no_version_marker():
     assert "structural" not in m
     assert "heat" not in m
     assert "motifs" not in m
+    # Sprint 0050 (T-0292) — epistemic block is v2-only.
+    assert "epistemic" not in m
 
 
 def test_session_init_explicit_v2_via_query_param():
@@ -284,6 +286,8 @@ def test_session_init_explicit_v2_via_query_param():
     assert "structural" in m
     assert "heat" in m
     assert "motifs" in m
+    # Sprint 0050 (T-0292) — epistemic block layered on v2.
+    assert "epistemic" in m
 
 
 def test_session_init_explicit_v2_via_header():
@@ -374,3 +378,93 @@ def test_session_init_v2_aggregates_are_rls_scoped_per_role():
         assert gm["structural"].get("edges", 0) <= am["structural"].get("edges", 0), (
             "agent's structural.edges exceeds admin's — RLS bypass on entry_links"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 0050 — epistemic axis on v2 manifest (T-0292)
+#
+# v2 gains a top-level `epistemic` block: a 4×4 nested dict keyed by
+# claim_type → verification_status → int counts. Body is the LOD0 corpus
+# epistemic histogram from `api.services.lod.get_epistemic_histogram`.
+# Pre-populated with zeros so the shape is stable across empty / non-empty
+# corpora; payload is tiny (~16 cells) so it fits the v2 token budget.
+# ---------------------------------------------------------------------------
+
+
+EXPECTED_CLAIM_TYPES = {"event", "observation", "claim", "rule"}
+EXPECTED_VERIFICATION_STATUSES = {"verified", "pending", "disputed", "superseded"}
+
+
+def test_session_init_v2_epistemic_block_shape():
+    """v2 manifest carries `epistemic` as a 4×4 nested dict of int counts.
+
+    Every claim_type key (event/observation/claim/rule) must be present and
+    map to a dict containing every verification_status key
+    (verified/pending/disputed/superseded). All leaf values are non-negative
+    ints — the histogram pre-populates zeros for empty cells so callers can
+    iterate the grid without conditionals.
+    """
+    r = requests.get(
+        f"{BASE_URL}/session-init?manifest_version=2",
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["manifest"]
+
+    assert "epistemic" in m, "v2 manifest must include the `epistemic` block"
+    epi = m["epistemic"]
+    assert isinstance(epi, dict)
+
+    # Outer keys cover the full claim_type enum.
+    assert set(epi.keys()) == EXPECTED_CLAIM_TYPES, (
+        f"epistemic outer keys must equal {EXPECTED_CLAIM_TYPES}, "
+        f"got {set(epi.keys())}"
+    )
+
+    # Each inner dict carries the full verification_status grid.
+    for ct, inner in epi.items():
+        assert isinstance(inner, dict), (
+            f"epistemic[{ct!r}] must be a dict, got {type(inner)}"
+        )
+        assert set(inner.keys()) == EXPECTED_VERIFICATION_STATUSES, (
+            f"epistemic[{ct!r}] inner keys must equal "
+            f"{EXPECTED_VERIFICATION_STATUSES}, got {set(inner.keys())}"
+        )
+        for vs, cnt in inner.items():
+            assert isinstance(cnt, int), (
+                f"epistemic[{ct!r}][{vs!r}] must be int, got {type(cnt)}"
+            )
+            assert cnt >= 0, (
+                f"epistemic[{ct!r}][{vs!r}] must be non-negative, got {cnt}"
+            )
+
+
+def test_session_init_v2_fits_token_budget_with_epistemic():
+    """v2 manifest including the new `epistemic` block must still fit the
+    Sprint-0049 token budget. Histogram is ~16 cells / ~200 tokens, so this
+    is the "still passes" regression — if it fails, the histogram has
+    grown unexpectedly or another block leaked in.
+    """
+    try:
+        import tiktoken
+    except ImportError:
+        pytest.skip("tiktoken not installed — `pip install tiktoken` to run")
+
+    r = requests.get(
+        f"{BASE_URL}/session-init?manifest_version=2",
+        headers=_headers(),
+        timeout=REQUEST_TIMEOUT,
+    )
+    assert r.status_code == 200, r.text
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    token_count = len(enc.encode(r.text))
+    # Sprint-0049 v2 budget: ~3K tokens on the seeded fixture. Epistemic
+    # adds ~200 tokens at most — comfortably under.
+    V2_TOKEN_BUDGET = 3072
+    assert token_count <= V2_TOKEN_BUDGET, (
+        f"v2 session_init blew the {V2_TOKEN_BUDGET}-token budget: "
+        f"{token_count} tokens. The new `epistemic` block (~16 cells) "
+        "should not push the manifest over budget — investigate."
+    )

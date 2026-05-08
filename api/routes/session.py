@@ -266,6 +266,14 @@ async def session_init(
         size_dist = await lod_service.get_size_distribution(conn)
         heat_bands = await lod_service.get_heat_bands(conn)
         motifs = await count_motifs(conn)
+        # T-0292 / Sprint 0050 — epistemic axis (LOD0 corpus histogram).
+        # 4×4 nested dict keyed by claim_type → verification_status → count.
+        # Pre-populated with zeros so the shape is stable on empty corpora.
+        # Tiny payload (~16 cells, ~200 tokens) — fits comfortably under the
+        # v2 token budget alongside structural/heat/motifs.
+        epistemic_hist = await lod_service.get_epistemic_histogram(
+            conn, scope_kind="corpus"
+        )
 
         manifest["manifest_version"] = 2
         manifest["structural"] = {
@@ -277,6 +285,7 @@ async def session_init(
         }
         manifest["heat"] = heat_bands
         manifest["motifs"] = motifs
+        manifest["epistemic"] = epistemic_hist
 
         return {"manifest": manifest}
 

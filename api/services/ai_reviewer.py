@@ -7,9 +7,85 @@ and governance rules. Returns approve / reject / escalate + reasoning.
 import json
 import logging
 import os
+import re
+import time
 from typing import Any
 
 from models import AIReviewResult
+
+# Sprint 0050 / T-0294 — opportunistic conflict-detection budget. We never
+# block the reviewer call on this; if the cheap in-memory pass exceeds the
+# budget we abandon and return an empty `conflict_with`. The budget is wall
+# clock, not CPU — safe under contention because we only iterate the already-
+# fetched `context_entries` list (no IO).
+_CONFLICT_DETECTION_BUDGET_S = 1.0
+_CONFLICT_WITH_CAP = 5
+# Tokens shorter than this are dropped from the overlap heuristic to avoid
+# stop-word noise.
+_MIN_TOKEN_LEN = 4
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase word tokens of length >= _MIN_TOKEN_LEN."""
+    if not text:
+        return set()
+    return {t.lower() for t in _TOKEN_RE.findall(text) if len(t) >= _MIN_TOKEN_LEN}
+
+
+def _detect_conflicts(
+    staging_item: dict,
+    context_entries: list[dict],
+    *,
+    budget_s: float = _CONFLICT_DETECTION_BUDGET_S,
+    cap: int = _CONFLICT_WITH_CAP,
+) -> list[str]:
+    """Cheap in-memory conflict detection.
+
+    Compares the staging item's title/content/tags against each context
+    entry; flags those with non-trivial token overlap or shared tags as
+    candidate conflicts. Returns up to `cap` entry ids. Hard time-budgeted —
+    abandons and returns whatever it has if it overruns.
+    """
+    if not context_entries:
+        return []
+
+    deadline = time.monotonic() + budget_s
+    proposed_title = staging_item.get("proposed_title") or ""
+    proposed_content = staging_item.get("proposed_content") or ""
+    meta = staging_item.get("proposed_meta") or {}
+    proposed_tags = set(meta.get("tags") or [])
+
+    proposed_tokens = _tokenize(proposed_title) | _tokenize(proposed_content[:2000])
+    if not proposed_tokens and not proposed_tags:
+        return []
+
+    conflicts: list[str] = []
+    for entry in context_entries:
+        if time.monotonic() >= deadline:
+            break  # budget exhausted; ship what we have
+        if len(conflicts) >= cap:
+            break
+
+        entry_id = entry.get("id")
+        if entry_id is None:
+            continue
+
+        entry_tokens = _tokenize(entry.get("title") or "") | _tokenize(
+            (entry.get("content") or "")[:2000]
+        )
+        entry_tags = set(entry.get("tags") or [])
+
+        token_overlap = len(proposed_tokens & entry_tokens)
+        tag_overlap = len(proposed_tags & entry_tags)
+
+        # Heuristic: any tag overlap, or >= 5 shared content tokens, marks
+        # the entry as a candidate conflict. Tunable; intentionally loose
+        # because the reviewer's `disputed` verdict already gates this.
+        if tag_overlap > 0 or token_overlap >= 5:
+            conflicts.append(str(entry_id))
+
+    return conflicts[:cap]
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +303,35 @@ async def review_staging_item(
                 confidence=confidence,
             )
 
-        return AIReviewResult(action=action, reasoning=reasoning, confidence=confidence)
+        # Sprint 0050 / T-0294 — opportunistic conflict detection +
+        # verification_status mapping. Cheap in-memory pass over the
+        # already-fetched context_entries; never blocks beyond the budget.
+        try:
+            conflicts = _detect_conflicts(staging_item, context_entries or [])
+        except Exception as exc:  # belt-and-suspenders — never block review
+            logger.warning("Conflict detection failed: %s", exc)
+            conflicts = []
+
+        if action == "approve":
+            verification_status = "verified"
+        elif action == "reject":
+            # Reject + conflicts found ⇒ disputed (contradicts existing data).
+            # Reject without conflicts ⇒ pending (e.g. malformed/spam — the
+            # promotion path won't fire anyway, but pending is the safer
+            # default for the column.)
+            verification_status = "disputed" if conflicts else "pending"
+        else:
+            # escalate — needs human. If we found conflicts, surface them
+            # by marking the row disputed; else leave pending.
+            verification_status = "disputed" if conflicts else "pending"
+
+        return AIReviewResult(
+            action=action,
+            reasoning=reasoning,
+            confidence=confidence,
+            verification_status=verification_status,
+            conflict_with=conflicts or None,
+        )
 
     except json.JSONDecodeError as exc:
         logger.warning("AI reviewer returned non-JSON response: %s", exc)

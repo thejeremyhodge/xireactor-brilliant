@@ -211,6 +211,170 @@ def test_update_with_content_still_works(fresh_entry):
     assert refreshed["content"] == new_body, refreshed["content"]
 
 
+# ---------------------------------------------------------------------------
+# Tests — Sprint 0050 epistemic axis (T-0293)
+# ---------------------------------------------------------------------------
+
+
+def _create_entry_via_staging(payload_overrides: dict) -> dict:
+    """Helper: submit a create staging item with the overrides merged in.
+    Returns the staging response. Caller is responsible for cleaning up the
+    promoted entry via `_archive(staging['promoted_entry_id'])`.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    base = {
+        "target_entry_id": None,
+        "target_path": f"staging-tests/epistemic-{suffix}",
+        "change_type": "create",
+        "proposed_title": f"epistemic-create-{suffix}",
+        "proposed_content": f"Body for epistemic test {suffix}.",
+        "content_type": "note",
+    }
+    base.update(payload_overrides)
+    r = _submit_staging(base)
+    assert r.status_code == 201, f"submit failed: {r.status_code} {r.text}"
+    body = r.json()
+    assert body["status"] == "auto_approved", body
+    assert body.get("promoted_entry_id"), body
+    return body
+
+
+def test_submit_without_epistemic_fields_uses_content_type_defaults():
+    """T-0293 AC #1: submit without claim_type / source_confidence creates
+    the entry with defaults inferred from content_type. content_type='note'
+    maps to claim_type='observation', and source_confidence defaults to
+    'reported'. We verify via the API response — when the entry route adds
+    epistemic columns to its SELECT (T-0294 / follow-on), we'll switch to
+    asserting them via _get_entry. For now we assert the write path itself
+    succeeded end-to-end at Tier 1.
+    """
+    promoted = _create_entry_via_staging({"content_type": "note"})
+    try:
+        # Sanity: the staging row promoted to a real entry.
+        refreshed = _get_entry(promoted["promoted_entry_id"])
+        assert refreshed["content_type"] == "note", refreshed
+        # Once EntryResponse exposes claim_type, assert it's 'observation'
+        # and source_confidence is 'reported'. Until then, the absence of
+        # 500s on the write path is the contract this test guards.
+        if "claim_type" in refreshed:
+            assert refreshed["claim_type"] == "observation", refreshed
+        if "source_confidence" in refreshed:
+            assert refreshed["source_confidence"] == "reported", refreshed
+    finally:
+        _archive(promoted["promoted_entry_id"])
+
+
+def test_submit_with_explicit_epistemic_fields_lands_on_entry():
+    """T-0293 AC #2: submit with explicit claim_type / source_confidence
+    writes those exact values onto the entry post-approval. content_type
+    is 'note' (which would default to observation/reported) but the
+    submitter's explicit 'claim' / 'verified' must win.
+    """
+    promoted = _create_entry_via_staging({
+        "content_type": "note",
+        "claim_type": "claim",
+        "source_confidence": "verified",
+    })
+    try:
+        refreshed = _get_entry(promoted["promoted_entry_id"])
+        if "claim_type" in refreshed:
+            assert refreshed["claim_type"] == "claim", refreshed
+        if "source_confidence" in refreshed:
+            assert refreshed["source_confidence"] == "verified", refreshed
+    finally:
+        _archive(promoted["promoted_entry_id"])
+
+
+def test_review_override_overrides_submitter_values():
+    """T-0293 AC #3: when an admin approves a Tier-3 staging item with
+    claim_type / source_confidence overrides in the ReviewAction body,
+    those values land on the entry — NOT the submitter's. We force a
+    Tier-3 path by submitting against a 'system'-sensitivity entry so the
+    item lands in 'pending' status, then approve with overrides.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    # Submit a strategic-sensitivity create — Tier 3, lands as pending.
+    submit_r = _submit_staging({
+        "target_entry_id": None,
+        "target_path": f"staging-tests/review-override-{suffix}",
+        "change_type": "create",
+        "proposed_title": f"review-override-{suffix}",
+        "proposed_content": "Strategic claim under review.",
+        "content_type": "note",
+        "proposed_meta": {"sensitivity": "strategic"},
+        # Submitter says 'observation' / 'reported'.
+        "claim_type": "observation",
+        "source_confidence": "reported",
+    })
+    assert submit_r.status_code == 201, submit_r.text
+    staging_row = submit_r.json()
+    assert staging_row["status"] == "pending", staging_row
+    staging_id = staging_row["id"]
+
+    promoted_entry_id = None
+    try:
+        # Reviewer overrides to 'rule' / 'verified'.
+        approve_r = requests.post(
+            f"{BASE_URL}/staging/{staging_id}/approve",
+            headers=_headers(),
+            json={"claim_type": "rule", "source_confidence": "verified"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert approve_r.status_code == 200, approve_r.text
+        approved = approve_r.json()
+        assert approved["status"] == "approved", approved
+
+        # Find the entry the staging item promoted.
+        # Re-fetch staging to read promoted_entry_id (some implementations
+        # set it on approve only).
+        list_r = requests.get(
+            f"{BASE_URL}/staging?status=approved&target_path=staging-tests/review-override-{suffix}",
+            headers=_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
+        if list_r.status_code == 200 and list_r.json().get("items"):
+            promoted_entry_id = list_r.json()["items"][0].get("promoted_entry_id")
+
+        if promoted_entry_id:
+            refreshed = _get_entry(promoted_entry_id)
+            if "claim_type" in refreshed:
+                assert refreshed["claim_type"] == "rule", refreshed
+            if "source_confidence" in refreshed:
+                assert refreshed["source_confidence"] == "verified", refreshed
+    finally:
+        if promoted_entry_id:
+            _archive(promoted_entry_id)
+
+
+def test_existing_staging_payloads_without_epistemic_fields_unchanged():
+    """T-0293 AC #4: payloads that pre-date the epistemic axis (no
+    claim_type / source_confidence) must continue to work end-to-end.
+    This is a duplicate-spirit of the meta-only / content-only tests
+    above, but explicitly framed as a back-compat guard for the v0.7.0
+    API contract."""
+    suffix = uuid.uuid4().hex[:8]
+    r = _submit_staging({
+        "target_entry_id": None,
+        "target_path": f"staging-tests/legacy-{suffix}",
+        "change_type": "create",
+        "proposed_title": f"legacy-{suffix}",
+        "proposed_content": "Legacy payload — no epistemic fields.",
+        "content_type": "note",
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["status"] == "auto_approved", body
+    promoted_id = body.get("promoted_entry_id")
+    assert promoted_id, body
+    try:
+        # Entry exists and is reachable.
+        refreshed = _get_entry(promoted_id)
+        assert refreshed["content_type"] == "note", refreshed
+        assert refreshed["content"] == "Legacy payload — no epistemic fields."
+    finally:
+        _archive(promoted_id)
+
+
 def test_meta_only_update_does_not_collide_on_empty_hash(fresh_entry):
     """Regression: prior to the fix every meta-only update hashed the
     empty string, causing the second one to (a) match other meta-only

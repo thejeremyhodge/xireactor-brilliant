@@ -1376,7 +1376,7 @@ Fetch a level-of-detail (LOD) view of the knowledge base along a structural or h
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `axis` | string | (required) | One of: `structural`, `heat` |
+| `axis` | string | (required) | One of: `structural`, `heat`, `epistemic` |
 | `scope` | string | `"corpus"` | One of: `corpus`, `community:tag:<tag>`, `community:path:<prefix>`, `node:<entry_id>` |
 | `level` | int | `0` | Supported: `0`, `1`, `2`, `4`, `6` (LOD3 / LOD5 deferred) |
 
@@ -1421,6 +1421,155 @@ await get_lod(axis="structural", scope="node:a1b2c3d4-0000-0000-0000-00000000000
 ```python
 await get_lod(axis="structural", scope="node:a1b2c3d4-0000-0000-0000-000000000000", level=6)
 ```
+
+### Heat axis examples (LOD0 / LOD1 / LOD2 / LOD4)
+
+`axis="heat"` returns read-traffic banding (`cold | warm | hot | spiking`)
+sourced from `entry_access_log`. Banding thresholds match the LOD0 corpus
+heat block at every level — same `cold/warm/hot/spiking` shape, scoped to
+either the corpus, a community membership predicate (LOD1/LOD2), or a
+single entry (LOD4). LOD6 stays heat-agnostic.
+
+**Example — LOD0 corpus heat (read-traffic snapshot of the whole corpus):**
+
+```python
+await get_lod(axis="heat", scope="corpus", level=0)
+# {"axis": "heat", "scope": "corpus", "level": 0,
+#  "heat": {"bands": {"cold": 812, "warm": 134, "hot": 41, "spiking": 3}}}
+```
+
+**Example — LOD2 community heat by tag (per-band counts inside a community):**
+
+```python
+await get_lod(axis="heat", scope="community:tag:project:atlas", level=2)
+# {"axis": "heat", "scope": "community:tag:project:atlas", "level": 2,
+#  "community_source": "tag",
+#  "heat": {"bands": {"cold": 18, "warm": 4, "hot": 2, "spiking": 0}}}
+```
+
+**Example — LOD2 community heat by path:**
+
+```python
+await get_lod(axis="heat", scope="community:path:Projects", level=2)
+```
+
+**Example — LOD4 node heat chip (single entry):**
+
+```python
+await get_lod(axis="heat", scope="node:a1b2c3d4-0000-0000-0000-000000000000", level=4)
+# {"axis": "heat", "scope": "node:a1b2c3d4-...", "level": 4,
+#  "id": "a1b2c3d4-...", "title": "Atlas kickoff notes",
+#  "heat": {"band": "hot", "reads_24h": 3, "reads_7d": 11,
+#           "last_ts": "2026-05-07T18:42:11+00:00"}}
+```
+
+**The `rls_filtered` hint (LOD4 heat).** `entry_access_log` is admin-only
+under RLS — a non-admin actor (or admin running with `X-Act-As-User`)
+sees zero rows even when the entry has been read frequently. To stop
+agents from misreading RLS-induced silence as "actually cold", LOD4 heat
+surfaces an `rls_filtered: true` field when **all three** of the
+following hold:
+
+1. `band == "cold"`
+2. `reads_7d == 0`
+3. The entry's degree (in + out) is greater than zero (i.e. it's
+   connected — a connected entry that *appears* unread is a strong
+   signal that the access log was filtered out, not that the entry is
+   cold).
+
+When the hint is absent, the cold band is the literal read-traffic
+signal you have access to. When the hint is present, treat the band as
+"unknown — RLS-filtered" and fall back to structural / connectivity
+signals to decide whether the entry is interesting.
+
+```python
+await get_lod(axis="heat", scope="node:<id>", level=4)
+# Non-admin actor on a connected entry:
+# {"axis": "heat", ..., "id": "...", "title": "...",
+#  "heat": {"band": "cold", "reads_24h": 0, "reads_7d": 0,
+#           "last_ts": null, "rls_filtered": true}}
+```
+
+#### Epistemic axis examples
+
+`axis="epistemic"` returns the **claim-status grid** added by Sprint 0050 /
+ADR #69. Every entry carries four epistemic fields (`claim_type`,
+`source_confidence`, `verification_status`, `conflict_with`); the
+epistemic axis exposes them as a 2D histogram (LOD0 / LOD2) or a per-node
+chip (LOD4).
+
+The histogram always returns the **full 4×4 grid** (`claim_type` ×
+`verification_status`) with zero counts where empty — callers can iterate
+the grid without conditionals. `claim_type` ∈ {`event`, `observation`,
+`claim`, `rule`}; `verification_status` ∈ {`verified`, `pending`,
+`disputed`, `superseded`}.
+
+**Defined at LOD0, LOD2, LOD4 only.** Epistemic does not have a community
+summary card (LOD1) or a node section outline (LOD6) — those levels return
+HTTP 400 with the exact detail string `"epistemic axis is defined at
+LOD0/LOD2/LOD4 only"`. Callers should treat that detail string as the
+signal to fall back to LOD0/2/4.
+
+**Example — LOD0 corpus epistemic histogram:**
+
+```python
+await get_lod(axis="epistemic", scope="corpus", level=0)
+# {"axis": "epistemic", "scope": "corpus", "level": 0,
+#  "epistemic": {
+#    "event":       {"verified": 12, "pending": 3, "disputed": 0, "superseded": 1},
+#    "observation": {"verified": 47, "pending": 18, "disputed": 2, "superseded": 0},
+#    "claim":       {"verified": 9,  "pending": 4, "disputed": 5, "superseded": 0},
+#    "rule":        {"verified": 6,  "pending": 0, "disputed": 0, "superseded": 0}
+#  }}
+```
+
+**Example — LOD2 community epistemic histogram (by tag):**
+
+```python
+await get_lod(axis="epistemic",
+              scope="community:tag:project:atlas",
+              level=2)
+# {"axis": "epistemic", "scope": "community:tag:project:atlas", "level": 2,
+#  "community_source": "tag",
+#  "epistemic": { ...same 4×4 shape, scoped to community members... }}
+```
+
+**Example — LOD4 node epistemic chip (single entry):**
+
+```python
+await get_lod(axis="epistemic",
+              scope="node:a1b2c3d4-0000-0000-0000-000000000000",
+              level=4)
+# {"axis": "epistemic", "scope": "node:...", "level": 4,
+#  "id": "a1b2c3d4-...",
+#  "epistemic": {
+#    "claim_type": "claim",
+#    "source_confidence": "reported",
+#    "verification_status": "disputed",
+#    "conflict_with": ["e5f6a7b8-..."]
+#  }}
+```
+
+The LOD4 epistemic chip is intentionally tight — it returns ONLY the four
+epistemic fields, with no `title` / `content` / `tags`. Callers who want
+both the structural silhouette AND the epistemic chip should issue two
+LOD4 calls (`axis="structural"` and `axis="epistemic"`).
+
+**Error contract for LOD1 / LOD6:**
+
+```python
+await get_lod(axis="epistemic", scope="community:tag:foo", level=1)
+# HTTP 400 — {"detail": "epistemic axis is defined at LOD0/LOD2/LOD4 only"}
+
+await get_lod(axis="epistemic", scope="node:<id>", level=6)
+# HTTP 400 — {"detail": "epistemic axis is defined at LOD0/LOD2/LOD4 only"}
+```
+
+**Recommended flow** (per skill SKILL.md, "narrow on disputed before
+adding claims"): when about to submit a new claim, fetch
+`axis="epistemic"&level=0` to spot non-zero `disputed` counts; if the
+relevant `claim_type` row has disputes, drill into the suspect community
+with LOD2, then fetch the conflict target via LOD4 before writing.
 
 ---
 

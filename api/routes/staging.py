@@ -11,8 +11,10 @@ from auth import UserContext, get_current_user
 from database import get_db
 from models import (
     AIReviewResult,
+    ClaimType,
     ProcessResult,
     ReviewAction,
+    SourceConfidence,
     StagingList,
     StagingResponse,
     StagingSubmit,
@@ -21,6 +23,48 @@ from services.access_log import log_entry_reads
 from services.ai_reviewer import review_staging_item
 
 router = APIRouter(tags=["staging"])
+
+
+# ---------------------------------------------------------------------------
+# Epistemic axis defaults (Sprint 0050, ADR #69)
+# ---------------------------------------------------------------------------
+# When submitters omit `claim_type` / `source_confidence`, the staging
+# write-path infers defaults from `content_type` via this lookup. Anything
+# not listed falls back to `observation` (the safest, most-narratable claim
+# type) and `reported` (matches the DB column default in migration 033).
+#
+# Mapping rationale:
+#   - note     → observation : a captured fact about something seen / heard.
+#   - decision → claim       : decisions are positional claims with consequences.
+#   - person   → observation : profile facts are observed, not asserted.
+#   - project  → observation : project state is observed, not asserted.
+#   - meeting  → event       : meetings are timestamped events.
+#   - * (else) → observation : safe default for unknown content_types.
+#
+# `source_confidence` defaults to 'reported' for everything (matches the
+# DB column default). Submitters who want 'verified' or 'inferred' must
+# provide it explicitly — the reviewer agent owns the verified-track via
+# `verification_status` (T-0294), not this lookup.
+
+_CONTENT_TYPE_TO_CLAIM_TYPE: dict[str, ClaimType] = {
+    "note": ClaimType.OBSERVATION,
+    "decision": ClaimType.CLAIM,
+    "person": ClaimType.OBSERVATION,
+    "project": ClaimType.OBSERVATION,
+    "meeting": ClaimType.EVENT,
+}
+
+
+def _default_claim_type(content_type: str | None) -> ClaimType:
+    """Resolve the default claim_type for a given content_type."""
+    if content_type is None:
+        return ClaimType.OBSERVATION
+    return _CONTENT_TYPE_TO_CLAIM_TYPE.get(content_type, ClaimType.OBSERVATION)
+
+
+def _default_source_confidence() -> SourceConfidence:
+    """All content_types share the same source_confidence default."""
+    return SourceConfidence.REPORTED
 
 
 # ---------------------------------------------------------------------------
@@ -128,24 +172,62 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
     await _validate_content_type(conn, content_type)
     sensitivity = meta.get("sensitivity", "shared")
     tags = meta.get("tags", [])
-    # Strip structural fields — only org-specific data belongs in domain_meta
+    # Epistemic axis (Sprint 0050). Submitter-provided values land in
+    # proposed_meta via the submit endpoint; on create we write them to the
+    # entry, defaulting from the content_type lookup when absent.
+    explicit_claim_type = meta.get("claim_type")
+    explicit_source_confidence = meta.get("source_confidence")
+    # Reviewer-only fields (Sprint 0050, T-0294). The AI reviewer at Tier 3
+    # may stamp `verification_status` and `conflict_with` into proposed_meta
+    # before promotion; if absent the DB column defaults take over.
+    explicit_verification_status = meta.get("verification_status")
+    explicit_conflict_with = meta.get("conflict_with")
+    # Strip structural + epistemic fields — only org-specific data belongs in domain_meta
     domain_meta = {k: v for k, v in meta.items()
-                   if k not in ("content_type", "sensitivity", "tags")}
+                   if k not in ("content_type", "sensitivity", "tags",
+                                "claim_type", "source_confidence",
+                                "verification_status", "conflict_with")}
 
     if staging["change_type"] == "create":
         content_hash = hashlib.sha256(staging["proposed_content"].encode()).hexdigest()
+        # Resolve epistemic defaults from content_type when submitter omitted them.
+        effective_claim_type = (
+            explicit_claim_type
+            if explicit_claim_type is not None
+            else _default_claim_type(content_type).value
+        )
+        effective_source_confidence = (
+            explicit_source_confidence
+            if explicit_source_confidence is not None
+            else _default_source_confidence().value
+        )
+        # Reviewer-stamped epistemic fields (Sprint 0050, T-0294). When the
+        # AI reviewer didn't run / didn't emit, the columns fall back to the
+        # DB defaults via COALESCE on the RETURNING side — but on INSERT we
+        # must pass NULL to let the column DEFAULT fire. Convert empty list
+        # to NULL too so the migration's `DEFAULT ARRAY[]::uuid[]` applies.
+        conflict_with_val = (
+            explicit_conflict_with[:5]
+            if isinstance(explicit_conflict_with, list) and explicit_conflict_with
+            else None
+        )
         cur = await conn.execute(
             """
             INSERT INTO entries (
                 org_id, title, content, content_hash,
                 content_type, logical_path, sensitivity,
                 tags, domain_meta, source,
-                created_by, updated_by
+                created_by, updated_by,
+                claim_type, source_confidence,
+                verification_status, conflict_with
             ) VALUES (
                 %s, %s, %s, %s,
                 %s, %s, %s,
                 %s, %s, %s,
-                %s, %s
+                %s, %s,
+                %s, %s,
+                COALESCE(%s::verification_status_t, 'pending'::verification_status_t),
+                COALESCE(%s::uuid[], ARRAY[]::uuid[])
             )
             RETURNING id, version
             """,
@@ -162,6 +244,10 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 staging["source"],
                 staging["submitted_by"],
                 approver_id,
+                effective_claim_type,
+                effective_source_confidence,
+                explicit_verification_status,
+                conflict_with_val,
             ),
         )
         cur.row_factory = dict_row
@@ -248,6 +334,16 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
         explicit_content_type = meta.get("content_type") if meta else None
         explicit_sensitivity = meta.get("sensitivity") if meta else None
 
+        # Epistemic axis (Sprint 0050) — only overwrite columns the caller
+        # explicitly provided. COALESCE guards keep existing values intact
+        # for plain content/title updates.
+        # Reviewer overrides (Sprint 0050, T-0294) — only overwrite when
+        # explicitly provided; preserve existing column values otherwise.
+        update_conflict_with = (
+            explicit_conflict_with[:5]
+            if isinstance(explicit_conflict_with, list) and explicit_conflict_with
+            else None
+        )
         await conn.execute(
             """
             UPDATE entries
@@ -261,7 +357,11 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 domain_meta = COALESCE(%s, domain_meta),
                 version = %s,
                 updated_by = %s,
-                source = %s
+                source = %s,
+                claim_type = COALESCE(%s::claim_type_t, claim_type),
+                source_confidence = COALESCE(%s::source_confidence_t, source_confidence),
+                verification_status = COALESCE(%s::verification_status_t, verification_status),
+                conflict_with = COALESCE(%s::uuid[], conflict_with)
             WHERE id = %s
             """,
             (
@@ -276,6 +376,10 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 new_version,
                 approver_id,
                 staging["source"],
+                explicit_claim_type,
+                explicit_source_confidence,
+                explicit_verification_status,
+                update_conflict_with,
                 staging["target_entry_id"],
             ),
         )
@@ -481,6 +585,19 @@ async def submit_staging(
         if body.proposed_meta is None:
             body.proposed_meta = {}
         body.proposed_meta["content_type"] = body.content_type
+
+    # Epistemic axis (Sprint 0050). Top-level body fields take precedence
+    # over anything already in proposed_meta — promotion reads from
+    # proposed_meta uniformly. When omitted, _promote_staging_item infers
+    # claim_type from content_type via _CONTENT_TYPE_TO_CLAIM_TYPE.
+    if body.claim_type is not None:
+        if body.proposed_meta is None:
+            body.proposed_meta = {}
+        body.proposed_meta["claim_type"] = body.claim_type.value
+    if body.source_confidence is not None:
+        if body.proposed_meta is None:
+            body.proposed_meta = {}
+        body.proposed_meta["source_confidence"] = body.source_confidence.value
 
     # Determine sensitivity from proposed_meta (if provided)
     sensitivity = None
@@ -930,6 +1047,21 @@ async def process_staging(
                         (reasoning_note, item["id"]),
                     )
 
+                    # Sprint 0050 / T-0294 — stamp reviewer-owned epistemic
+                    # fields onto proposed_meta so _promote_staging_item
+                    # writes them onto the entry. `conflict_with` is capped
+                    # at 5 in the reviewer; we re-cap defensively here too.
+                    if (
+                        ai_result.verification_status is not None
+                        or ai_result.conflict_with
+                    ):
+                        merged_meta = dict(item.get("proposed_meta") or {})
+                        if ai_result.verification_status is not None:
+                            merged_meta["verification_status"] = ai_result.verification_status
+                        if ai_result.conflict_with:
+                            merged_meta["conflict_with"] = list(ai_result.conflict_with)[:5]
+                        item["proposed_meta"] = merged_meta
+
                 # All checks pass — auto-approve (or AI-approved for Tier 3)
                 entry_row = await _promote_staging_item(conn, item, user.id)
                 await conn.execute(
@@ -1002,6 +1134,18 @@ async def approve_staging(
                 status_code=409,
                 detail=f"Staging item is already '{staging['status']}', cannot approve",
             )
+
+        # Reviewer overrides (Sprint 0050) — merge claim_type / source_confidence
+        # from the ReviewAction body into proposed_meta so _promote_staging_item
+        # writes them onto the entry. These take precedence over the submitter's
+        # values.
+        if body is not None and (body.claim_type is not None or body.source_confidence is not None):
+            merged_meta = dict(staging["proposed_meta"] or {})
+            if body.claim_type is not None:
+                merged_meta["claim_type"] = body.claim_type.value
+            if body.source_confidence is not None:
+                merged_meta["source_confidence"] = body.source_confidence.value
+            staging["proposed_meta"] = merged_meta
 
         # Promote entry using shared helper
         await _promote_staging_item(conn, staging, user.id)

@@ -1,7 +1,7 @@
 ---
 name: brilliant-kb-assistant
 description: xiReactor Brilliant Knowledge Base assistant — manages sessions, daily notes, content routing, search, browsing, governance, and meeting intelligence via MCP. Use when the user asks about organizational knowledge, needs to look something up, wants to create or update KB content, says "resume", "compress", "daily", "search", or when you need institutional context.
-skill_version: 0.8.0
+skill_version: 0.9.0
 ---
 
 # Brilliant Knowledge Base Assistant
@@ -19,7 +19,7 @@ Use this skill to:
 
 ## Session Start: Version Check
 
-**Before any other Brilliant action on a fresh session**, call the `get_version` MCP tool. The response carries seven fields; the three you compare are `min_skill_version`, `latest_skill_version`, and this skill's own `skill_version` (declared in the frontmatter at the top of this file — currently **0.8.0**).
+**Before any other Brilliant action on a fresh session**, call the `get_version` MCP tool. The response carries seven fields; the three you compare are `min_skill_version`, `latest_skill_version`, and this skill's own `skill_version` (declared in the frontmatter at the top of this file — currently **0.9.0**).
 
 Three outcomes — pick exactly one:
 
@@ -186,6 +186,10 @@ At the beginning of every conversation, initialize your KB context:
    - User asks about a project area → pick a community from `top_paths` or a `project:*` tag, fetch `get_lod(axis='structural', scope='community:tag:project:atlas', level=2)` for the community silhouette, then `get_lod(level=4, scope='node:<id>')` for individual node silhouettes.
 
    `search_entries` is the last resort for genuine keyword discovery, not the first move. The LOD0 map is ~3K tokens; spending it once at session start is far cheaper than blind search across a large corpus.
+
+   **Epistemic axis — narrow on disputed before claiming.** Before adding a new claim or decision that could collide with prior org knowledge, fetch `get_lod(axis='epistemic', scope='corpus', level=0)`. The response carries verification-status counts (`verified`, `unverified`, `disputed`, `deprecated`) plus a per-community breakdown. If `disputed` is non-zero on a community related to your claim, descend with `get_lod(axis='epistemic', scope='node:<id>', level=4)` on the suspected conflict-target before you submit — the node-level silhouette names the disputing entries so you can read them and reconcile (or supersede) instead of layering a fresh contradiction on top.
+
+   The epistemic axis is supported at LOD0 (corpus), LOD2 (community), and LOD4 (node). LOD1 and LOD6 reject `axis=epistemic` with a 400 — those levels are structural-only by design. See `references/api-reference.md` for full request/response examples.
 
 5. **Drill down instead of dumping.** The manifest deliberately omits full content. When you need more detail:
    - `get_lod(scope='community:tag:<tag>'|'community:path:<prefix>', level=2)` — community silhouette (counts + dominant tags + dominant content_types)

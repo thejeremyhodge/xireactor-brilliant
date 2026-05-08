@@ -1,18 +1,19 @@
-"""GET /lod — multi-axis level-of-detail endpoint (Sprint 0049).
+"""GET /lod — multi-axis level-of-detail endpoint (Sprint 0049 / 0050).
 
-Three axes are envisioned (structural, heat, epistemic). This sprint ships
-**structural** + **heat** at LOD0 (corpus), LOD1 (community), LOD2
-(community silhouette card), LOD4 (node silhouette), and LOD6
-(node section outline). The epistemic axis is deferred (see spec).
+Three axes ship: **structural** (every advertised level), **heat** (LOD0
+corpus + LOD1/LOD2 community + LOD4 node, T-0289), and **epistemic**
+(LOD0 corpus + LOD2 community + LOD4 node only — T-0291). Epistemic at
+LOD1 and LOD6 returns 400 with a documented error string.
 
 Grammar:
 
     GET /lod?axis=<axis>&scope=<scope>&level=<int>
 
-  axis  ∈ {"structural", "heat"}
+  axis  ∈ {"structural", "heat", "epistemic"}
   scope ∈ {"corpus", "community:tag:<tag>", "community:path:<prefix>",
            "node:<id>"}
   level ∈ {0, 1, 2, 4, 6}   # 4/6 are node-scoped only
+                             # epistemic: 0/2/4 only (1/6 → 400)
 
 Response shape (corpus, level=0):
   axis=structural → {axis, scope, level, structural: {edges, relation_types,
@@ -57,14 +58,21 @@ from services import section_outline as section_outline_service
 
 router = APIRouter(tags=["lod"])
 
-VALID_AXES = ("structural", "heat")
+VALID_AXES = ("structural", "heat", "epistemic")
 SUPPORTED_LEVELS = (0, 1, 2, 4, 6)
 DEFERRED_LEVELS: tuple[int, ...] = ()
 
 GRAMMAR_HINT = (
-    "Grammar: axis ∈ {structural, heat}; "
+    "Grammar: axis ∈ {structural, heat, epistemic}; "
     "scope ∈ {corpus, community:tag:<tag>, community:path:<prefix>, node:<id>}; "
     "level ∈ {0, 1, 2, 4, 6}."
+)
+
+# Epistemic axis is defined only at LOD0 (corpus histogram), LOD2 (community
+# histogram), and LOD4 (node chip). LOD1 and LOD6 return 400 with the exact
+# error string below — tests assert this verbatim. (T-0291 / Sprint 0050.)
+EPISTEMIC_LEVEL_ERROR = (
+    "epistemic axis is defined at LOD0/LOD2/LOD4 only"
 )
 
 # LOD4 / LOD6 are node-scoped only.
@@ -129,7 +137,7 @@ def _parse_scope(scope: str) -> tuple[str, str | None, str | None]:
 @router.get("")
 async def get_lod(
     request: Request,
-    axis: str = Query(..., description="structural | heat"),
+    axis: str = Query(..., description="structural | heat | epistemic"),
     scope: str = Query("corpus", description="corpus | community:tag:<tag> | community:path:<prefix>"),
     level: int = Query(0, description="0 | 1 (2/4/6 not yet supported)"),
     user: UserContext = Depends(get_current_user),
@@ -162,6 +170,15 @@ async def get_lod(
         raise HTTPException(
             status_code=400,
             detail=f"Invalid level={level}. {GRAMMAR_HINT}",
+        )
+
+    # ---- epistemic axis: only LOD0/LOD2/LOD4 are defined -------------------
+    # Reject early with the exact documented error so callers can self-correct
+    # before scope-specific validation muddies the message. (T-0291.)
+    if axis == "epistemic" and level in (1, 6):
+        raise HTTPException(
+            status_code=400,
+            detail=EPISTEMIC_LEVEL_ERROR,
         )
 
     # ---- parse scope -------------------------------------------------------
@@ -248,8 +265,12 @@ async def _corpus_lod0(
             "orphans": await lod_service.get_orphan_count(conn),
             "size_distribution": await lod_service.get_size_distribution(conn),
         }
-    else:  # axis == "heat"
+    elif axis == "heat":
         base["heat"] = {"bands": await lod_service.get_heat_bands(conn)}
+    else:  # axis == "epistemic" (T-0291) — corpus 4×4 claim×status histogram
+        base["epistemic"] = await lod_service.get_epistemic_histogram(
+            conn, "corpus"
+        )
 
     return base
 
@@ -389,9 +410,27 @@ async def _community_lod1(
     against the same predicate on both endpoints (a "community-internal"
     edge has both source and target inside the community).
 
-    Both axes return the same community shape — heat-banding inside a
-    community is deferred (the v2 manifest scope is corpus-level).
+    axis='structural' → community membership stats (node_count, edge_count,
+    top_tags, dominant_content_types) — historic shape, byte-stable for
+    v0.7.x clients.
+
+    axis='heat' (T-0289 / GH #73) → per-band counts over the community's
+    entry set. Same banding shape as the LOD0 corpus heat block. Prior to
+    Sprint 0050 this fell through to the structural payload regardless of
+    `axis=` — that was the silent no-op #73 reported.
     """
+    if axis == "heat":
+        bands = await lod_service.get_community_heat_bands(
+            conn, community_source, value
+        )
+        return {
+            "axis": axis,
+            "scope": scope,
+            "level": level,
+            "community_source": community_source,
+            "heat": {"bands": bands},
+        }
+
     agg = await _community_aggregate(
         conn,
         community_source,
@@ -442,7 +481,41 @@ async def _community_lod2(
     legacy ``dominant_content_types`` field name, and ``community_source``
     embedded inside the card so callers can pass the silhouette around as a
     self-describing object).
+
+    axis='heat' (T-0289 / GH #73) → per-band counts over the community's
+    entry set, same shape as the LOD0 corpus heat block. Prior to Sprint
+    0050 LOD2 silently returned the structural silhouette regardless of
+    the `axis=` query param.
     """
+    if axis == "heat":
+        bands = await lod_service.get_community_heat_bands(
+            conn, community_source, value
+        )
+        return {
+            "axis": axis,
+            "scope": scope,
+            "level": level,
+            "community_source": community_source,
+            "heat": {"bands": bands},
+        }
+
+    if axis == "epistemic":
+        # T-0291: per-community 4×4 (claim_type × verification_status) grid.
+        # Same scope grammar as community heat/structural.
+        grid = await lod_service.get_epistemic_histogram(
+            conn,
+            "community",
+            community_source=community_source,
+            value=value,
+        )
+        return {
+            "axis": axis,
+            "scope": scope,
+            "level": level,
+            "community_source": community_source,
+            "epistemic": grid,
+        }
+
     agg = await _community_aggregate(
         conn,
         community_source,
@@ -481,10 +554,60 @@ async def _node_lod4(
     level: int,
     entry_id: str,
 ) -> dict[str, Any]:
-    """LOD4 node silhouette."""
+    """LOD4 node silhouette (axis=structural) or heat chip (axis=heat).
+
+    axis='heat' (T-0289 / GH #73): returns the heat chip
+    `{id, title, heat: {band, reads_24h, reads_7d, last_ts, [rls_filtered]}}`
+    instead of the structural silhouette. Prior to Sprint 0050 LOD4 silently
+    returned the silhouette regardless of `axis=`.
+
+    The `rls_filtered` hint is present (and `true`) when band==cold AND
+    reads_7d==0 AND degree>0 — surfacing the cheap "non-admin act-as
+    readers see entry_access_log as empty under RLS" signal so agents
+    don't misread RLS-induced silence as actual cold traffic.
+    """
+    # Compute the silhouette regardless: it gives us id/title/degree which
+    # the heat chip also wants, and a single read here is cheaper than two
+    # round-trips to Postgres.
     silhouette = await lod_service.get_node_silhouette(conn, entry_id)
     if silhouette is None:
         raise HTTPException(status_code=404, detail="node not found")
+
+    if axis == "heat":
+        degree = int(silhouette.get("degree_in", 0)) + int(
+            silhouette.get("degree_out", 0)
+        )
+        heat = await lod_service.get_node_heat(
+            conn, entry_id, degree=degree
+        )
+        # Visibility was confirmed by silhouette above; heat helper should
+        # not return None here, but stay defensive.
+        if heat is None:
+            raise HTTPException(status_code=404, detail="node not found")
+        return {
+            "axis": axis,
+            "scope": scope,
+            "level": level,
+            "id": silhouette["id"],
+            "title": silhouette["title"],
+            "heat": heat,
+        }
+
+    if axis == "epistemic":
+        # T-0291: tight 4-field epistemic chip. Intentionally NO title /
+        # content / tags here — acceptance criterion #2 is that the chip
+        # leaks no extra columns from `entries`. Callers wanting both
+        # silhouette and epistemic should issue two LOD4 calls.
+        chip = await lod_service.get_node_epistemic(conn, entry_id)
+        if chip is None:  # pragma: no cover — silhouette already 404'd above
+            raise HTTPException(status_code=404, detail="node not found")
+        return {
+            "axis": axis,
+            "scope": scope,
+            "level": level,
+            "id": silhouette["id"],
+            "epistemic": chip,
+        }
 
     return {
         "axis": axis,

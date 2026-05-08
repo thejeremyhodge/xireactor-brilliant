@@ -242,6 +242,25 @@ ORDER BY bucket DESC;
 This is the measurement promised in spec 0049 §"Measurement scaffold" /
 handoff §10 step 3: "did this change agent behavior?".
 
+## Epistemic histogram (Sprint 0050)
+
+The epistemic axis (Sprint 0050, ADR #69) adds four columns to `entries` —
+`claim_type`, `source_confidence`, `verification_status`, and `conflict_with`.
+Ops can query the corpus-wide epistemic histogram directly for dashboards or
+spot-checks:
+
+```sql
+SELECT claim_type, verification_status, COUNT(*) AS n
+FROM entries
+WHERE status = 'published'
+GROUP BY claim_type, verification_status
+ORDER BY claim_type, verification_status;
+```
+
+The partial covering index `entries_epistemic_histogram_idx (claim_type,
+verification_status)` backs this query — the same index that backs the
+`GET /lod?axis=epistemic&scope=corpus&level=0` aggregate in `api/services/lod.py`.
+
 ## Test coverage
 
 `tests/test_observability.py` ships 11 integration cases covering: middleware behavior, `/health` exclusion, single vs. batched inserts, graph cache interaction, viewer 403 on analytics, rollup response shapes, `since` parser, `actor_type` validation, and RLS enforcement at the psql layer. Runs against the live stack (`BASE_URL`, `DB_DSN` env-overridable).

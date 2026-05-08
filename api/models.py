@@ -1,9 +1,39 @@
 """Pydantic models for knowledge base entries."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+# =============================================================================
+# Epistemic axis enums (Sprint 0050, ADR #69)
+# =============================================================================
+# Mirror the Postgres enums defined in db/migrations/033_epistemic_axis.sql.
+# Values must stay byte-identical to the SQL enum values — they cross the
+# wire as plain strings on entry payloads and LOD epistemic responses.
+
+
+class ClaimType(str, Enum):
+    EVENT = "event"
+    OBSERVATION = "observation"
+    CLAIM = "claim"
+    RULE = "rule"
+
+
+class SourceConfidence(str, Enum):
+    VERIFIED = "verified"
+    REPORTED = "reported"
+    INFERRED = "inferred"
+    RUMOR = "rumor"
+
+
+class VerificationStatus(str, Enum):
+    VERIFIED = "verified"
+    PENDING = "pending"
+    DISPUTED = "disputed"
+    SUPERSEDED = "superseded"
 
 
 # NOTE: content_type is governed by `content_type_registry` at runtime
@@ -33,6 +63,12 @@ class EntryCreate(BaseModel):
     tags: list[str] = []
     domain_meta: dict = {}
     project_id: str | None = None
+    # Epistemic axis (Sprint 0050, ADR #69). Optional on submit — when omitted,
+    # the staging write-path infers defaults from `content_type` and the DB
+    # column defaults backfill the rest (`verification_status='pending'`,
+    # `conflict_with=[]`).
+    claim_type: ClaimType | None = None
+    source_confidence: SourceConfidence | None = None
 
 
 class EntryUpdate(BaseModel):
@@ -46,6 +82,12 @@ class EntryUpdate(BaseModel):
     tags: list[str] | None = None
     domain_meta: dict | None = None
     expected_version: int | None = None
+    # Epistemic axis overrides (Sprint 0050). All optional — only the fields
+    # the caller wants to change need be present.
+    claim_type: ClaimType | None = None
+    source_confidence: SourceConfidence | None = None
+    verification_status: VerificationStatus | None = None
+    conflict_with: list[str] | None = None
 
 
 class EntryAppend(BaseModel):
@@ -74,6 +116,14 @@ class EntryResponse(BaseModel):
     updated_by: str
     created_at: datetime
     updated_at: datetime
+    # Epistemic axis (Sprint 0050, ADR #69). Optional on the response so older
+    # API clients that pre-date migration 033 don't choke when the columns are
+    # absent in cached / replayed payloads. The DB-backed values land here on
+    # all post-0.9.0 reads.
+    claim_type: ClaimType | None = None
+    source_confidence: SourceConfidence | None = None
+    verification_status: VerificationStatus | None = None
+    conflict_with: list[str] = []
 
 
 class EntryList(BaseModel):
@@ -211,6 +261,13 @@ class StagingSubmit(BaseModel):
     content_type: str | None = None  # explicit content_type; required for create
     submission_category: str = "user_direct"
     expected_version: int | None = None
+    # Epistemic axis (Sprint 0050, ADR #69). Optional on submit — when omitted,
+    # the staging write-path infers `claim_type` from `content_type` via the
+    # lookup table colocated with the route, and `source_confidence` defaults
+    # to 'reported'. Reviewer-only fields (`verification_status`, `conflict_with`)
+    # are NOT accepted on submit — they are written by the reviewer agent.
+    claim_type: ClaimType | None = None
+    source_confidence: SourceConfidence | None = None
 
 
 class StagingResponse(BaseModel):
@@ -239,6 +296,13 @@ class StagingList(BaseModel):
 
 class ReviewAction(BaseModel):
     reason: str | None = None
+    # Epistemic axis overrides on approval (Sprint 0050). When supplied on
+    # POST /staging/{id}/approve, these values are written onto the underlying
+    # entry — they take precedence over whatever the submitter provided.
+    # Reviewer-only fields (`verification_status`, `conflict_with`) live on
+    # the AI-reviewer code path, not here.
+    claim_type: ClaimType | None = None
+    source_confidence: SourceConfidence | None = None
 
 
 class AIReviewResult(BaseModel):
@@ -246,6 +310,13 @@ class AIReviewResult(BaseModel):
     action: str  # "approve", "reject", or "escalate"
     reasoning: str
     confidence: float = 0.0
+    # Epistemic axis (Sprint 0050, T-0294). The reviewer owns these on the
+    # Tier 3 promotion path: auto-approve → 'verified'; needs-human → 'pending';
+    # contradicts existing → 'disputed' + conflict_with populated. Both fields
+    # are optional so the absence of an LLM call (or the API key) leaves the
+    # DB column defaults intact ('pending', empty array).
+    verification_status: str | None = None
+    conflict_with: list[str] | None = None
 
 
 class ProcessResult(BaseModel):
