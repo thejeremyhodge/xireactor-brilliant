@@ -187,11 +187,20 @@ CREATE TRIGGER users_provision_zone_trigger
 -- Backfill — every existing user gets a zone (idempotent via ON CONFLICT inside)
 -- =============================================================================
 
+-- Render PG has no pre-registered `app.*` GUCs, and `groups` has FORCE RLS
+-- with policies referencing `current_setting('app.org_id')` (single-arg form,
+-- which throws on missing). provision_user_zone is SECURITY DEFINER but FORCE
+-- RLS still applies to the function owner — so set the session vars per row
+-- before each call.
 DO $$
 DECLARE
     r RECORD;
 BEGIN
+    PERFORM set_config('app.org_id',  '', true);
+    PERFORM set_config('app.user_id', '', true);
     FOR r IN SELECT id, org_id FROM users LOOP
+        PERFORM set_config('app.org_id',  r.org_id, true);
+        PERFORM set_config('app.user_id', r.id,     true);
         PERFORM provision_user_zone(r.id, r.org_id);
     END LOOP;
 END$$;
