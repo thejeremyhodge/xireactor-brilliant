@@ -1,7 +1,7 @@
 ---
 name: brilliant-kb-assistant
 description: xiReactor Brilliant Knowledge Base assistant — manages sessions, daily notes, content routing, search, browsing, governance, and meeting intelligence via MCP. Use when the user asks about organizational knowledge, needs to look something up, wants to create or update KB content, says "resume", "compress", "daily", "search", or when you need institutional context.
-skill_version: 0.9.0
+skill_version: 0.10.0
 ---
 
 # Brilliant Knowledge Base Assistant
@@ -19,7 +19,7 @@ Use this skill to:
 
 ## Session Start: Version Check
 
-**Before any other Brilliant action on a fresh session**, call the `get_version` MCP tool. The response carries seven fields; the three you compare are `min_skill_version`, `latest_skill_version`, and this skill's own `skill_version` (declared in the frontmatter at the top of this file — currently **0.9.0**).
+**Before any other Brilliant action on a fresh session**, call the `get_version` MCP tool. The response carries seven fields; the three you compare are `min_skill_version`, `latest_skill_version`, and this skill's own `skill_version` (declared in the frontmatter at the top of this file — currently **0.10.0**).
 
 Three outcomes — pick exactly one:
 
@@ -561,6 +561,31 @@ Rule of thumb: **< 10 files → per-entry tools; ≥ 10 files from a single sour
 
 ---
 
+## Personal Zones (default safety)
+
+Every user has an auto-created **personal zone** — a private group walled off from everyone else, including org admins via the API. The zone is the default landing pad for new content so nothing accidentally leaks before the user has decided who should see it.
+
+- Any `create_entry` (or `submit_staging` create) **without an explicit `sensitivity`** lands in the caller's zone — visible only to them. Same applies for explicit `sensitivity='private'` (uniform rule).
+- To share a zone entry, call `promote_entry(entry_id, add_principals=[...], new_sensitivity=...)`. Promotion is **additive** — the zone grant is permanent, the user never loses access to their own data; you can only widen scope, never narrow it back below the owner.
+- Use `list_zone(limit=, offset=)` to see what's currently in the caller's zone (only the caller's own zone is ever visible through this tool).
+- If a user asks "share this with the team," promote — don't recreate. Don't pass `sensitivity` on the original create just to skip the zone; the safety default exists so nothing leaks pre-review.
+
+### Worked example
+
+User: "Share my Atlas onboarding doc (`entry_abc123`) with the engineering group as viewers, and bump it to shared."
+
+```
+promote_entry(
+  entry_id="entry_abc123",
+  add_principals=[{"principal_type": "group", "principal_id": "<engineering_group_id>", "role": "viewer"}],
+  new_sensitivity="shared",
+)
+```
+
+After this call: engineering can read the entry, the caller still has admin (zone grant intact), and the entry's `sensitivity` is now `shared`. Confirm in chat with the human-readable summary the tool returns.
+
+---
+
 ## Update Content
 
 ### Determine write path
@@ -742,6 +767,8 @@ The content-type registry lives in its own table and is fetched via `get_types` 
 | `list_tags` | Paginated full tag corpus with usage counts (count desc, tag asc; RLS-scoped) |
 | `get_tag_neighbors` | Tags that co-occur with a given tag (ranked by co-count + Jaccard similarity) |
 | `redeem_invite` | Redeem invite code to join org (unauthenticated) |
+| `list_zone` | List entries in the caller's personal zone (default-safe write target) |
+| `promote_entry` | Additively grant principals access to a zone entry; optionally bump sensitivity. Zone grant is preserved — owner never loses access |
 
 ## Auto-Save Rule
 

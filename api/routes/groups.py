@@ -43,6 +43,27 @@ def _require_admin(user: UserContext) -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+async def _assert_not_zone(conn, group_id: str) -> None:
+    """Raise 403 if `group_id` refers to a personal zone group.
+
+    The migration-034 BEFORE triggers bypass `kb_admin`, and API admin requests
+    run as the `kb_admin` PG role — so trigger enforcement alone lets admins
+    delete or modify zones via the standard groups CRUD. This guard closes the
+    API-surface gap. Direct-DB maintenance via psql still bypasses (intentional
+    escape hatch for operators).
+    """
+    cur = await conn.execute(
+        "SELECT is_zone FROM groups WHERE id = %s",
+        (group_id,),
+    )
+    row = await cur.fetchone()
+    if row is not None and row[0] is True:
+        raise HTTPException(
+            status_code=403,
+            detail="Personal zone groups are immutable via the API",
+        )
+
+
 def _row_to_group_response(row: dict) -> GroupResponse:
     return GroupResponse(
         id=str(row["id"]),
@@ -266,6 +287,8 @@ async def delete_group(
         if (await cur.fetchone()) is None:
             raise HTTPException(status_code=404, detail="Group not found")
 
+        await _assert_not_zone(conn, group_id)
+
         # Explicit cleanup of polymorphic permission grants (no FK cascade possible).
         await conn.execute(
             """
@@ -324,6 +347,8 @@ async def add_group_member(
         )
         if (await cur.fetchone()) is None:
             raise HTTPException(status_code=404, detail="Group not found")
+
+        await _assert_not_zone(conn, group_id)
 
         # Verify the target user exists in the same org. users table has no RLS,
         # so we scope explicitly via org_id.
@@ -390,6 +415,8 @@ async def remove_group_member(
     _require_admin(user)
 
     async with get_db(user) as conn:
+        await _assert_not_zone(conn, group_id)
+
         cur = await conn.execute(
             """
             DELETE FROM group_members

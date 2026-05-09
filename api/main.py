@@ -200,6 +200,8 @@ _route_modules = [
     ("routes.users", "members_router", "/org"),
     ("routes.users", "users_router", "/users"),
     ("routes.groups", "groups_router", "/groups"),
+    # Personal zones (Sprint 0051) — GET /zone, POST /zone/promote.
+    ("routes.zones", "router", "/zone"),
     ("routes.comments", "entries_comments_router", "/entries"),
     ("routes.comments", "comments_router", "/comments"),
     ("routes.attachments", "router", "/attachments"),
