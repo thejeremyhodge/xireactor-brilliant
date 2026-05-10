@@ -21,6 +21,7 @@ from models import (
 from services.access_log import log_entry_reads
 from services.links import sync_entry_links
 from services.render import resolve_wiki_links
+from services.zones import get_or_create_zone
 
 router = APIRouter(tags=["entries"])
 
@@ -102,14 +103,32 @@ async def create_entry(
     body: EntryCreate,
     user: UserContext = Depends(get_current_user),
 ):
-    """Create a new knowledge base entry."""
+    """Create a new knowledge base entry.
+
+    Personal-zones default (Sprint 0051): when ``body.sensitivity`` is
+    omitted, the entry lands in the caller's zone — sensitivity is set to
+    ``'private'`` and the caller's zone group is granted ``admin`` on the
+    new entry in the same transaction. Any explicit ``sensitivity='private'``
+    write also gets the zone grant (uniform rule). Explicit non-private
+    sensitivities preserve caller intent — no zone grant is added.
+    """
     _require_non_agent(user)
 
+    # Personal-zones default: missing sensitivity → 'private' + zone grant.
+    # Track whether we should fire the zone grant after the entries INSERT.
+    # Uniform rule: any new entry with sensitivity='private' gets a zone
+    # grant, regardless of whether the caller passed it explicitly or not.
+    if body.sensitivity is None:
+        sensitivity = "private"
+    else:
+        sensitivity = body.sensitivity
+    wrote_to_zone = sensitivity == "private"
+
     # Validate sensitivity
-    if body.sensitivity not in VALID_SENSITIVITIES:
+    if sensitivity not in VALID_SENSITIVITIES:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid sensitivity '{body.sensitivity}'. Must be one of: {sorted(VALID_SENSITIVITIES)}",
+            detail=f"Invalid sensitivity '{sensitivity}'. Must be one of: {sorted(VALID_SENSITIVITIES)}",
         )
 
     content_hash = hashlib.sha256(body.content.encode()).hexdigest()
@@ -141,7 +160,7 @@ async def create_entry(
                 "content_hash": content_hash,
                 "content_type": body.content_type,
                 "logical_path": body.logical_path,
-                "sensitivity": body.sensitivity,
+                "sensitivity": sensitivity,
                 "department": body.department,
                 "owner_id": user.id,
                 "project_id": body.project_id,
@@ -154,6 +173,19 @@ async def create_entry(
         )
         cur.row_factory = dict_row
         row = await cur.fetchone()
+
+        # Personal-zones safety invariant (Sprint 0051): any new private entry
+        # gets an additive `admin` grant for the caller's zone group. Same
+        # transaction as the entries INSERT — failure here rolls back the
+        # entry write so we never end up with a "private" entry that has no
+        # zone owner. Routed through the SECURITY DEFINER helper because
+        # non-admin kb_* roles only have SELECT on `permissions` (migration 018).
+        if wrote_to_zone:
+            zone_group_id = await get_or_create_zone(conn, user.id, user.org_id)
+            await conn.execute(
+                "SELECT grant_zone_admin_on_entry(%s, %s, %s, %s)",
+                (user.org_id, zone_group_id, row["id"], user.id),
+            )
 
         # Populate entry_links from [[wiki-links]] in content so the read-time
         # resolver (services/render.py) has rows to join. Without this, MCP/UI

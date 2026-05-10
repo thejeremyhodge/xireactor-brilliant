@@ -58,7 +58,10 @@ class EntryCreate(BaseModel):
     summary: str | None = None
     content_type: str  # must be one of the 11 valid types
     logical_path: str
-    sensitivity: str = "shared"
+    # Optional: when omitted, the entry-write path defaults to 'private' and
+    # grants the caller's personal zone group `admin` on the new entry. See
+    # `api/services/zones.py` and the personal-zones spec (Sprint 0051).
+    sensitivity: Optional[str] = None
     department: str | None = None
     tags: list[str] = []
     domain_meta: dict = {}
@@ -579,6 +582,37 @@ class EntryPermissionResponse(BaseModel):
     role: str
     granted_by: str
     created_at: datetime
+
+
+# =============================================================================
+# Personal-zones models (Sprint 0051)
+# =============================================================================
+
+
+class ZonePromotePrincipal(BaseModel):
+    """One principal grant to add during a zone promote operation."""
+    principal_type: Literal["user", "group"]
+    principal_id: str
+    role: Literal["admin", "editor", "commenter", "viewer"]
+
+
+class ZonePromote(BaseModel):
+    """Body for POST /zone/promote — additive permission grants on a zone entry.
+
+    Promotion is additive — the caller's zone-group `admin` grant is preserved
+    so the user never loses access to their own data. ``new_sensitivity`` is
+    optional; when provided it is validated against ``VALID_SENSITIVITIES``
+    and rejected if it would downgrade a non-private entry back to ``private``.
+    """
+    entry_id: str
+    add_principals: list[ZonePromotePrincipal] = []
+    new_sensitivity: Optional[str] = None
+
+
+class ZonePromoteResponse(BaseModel):
+    """Response for POST /zone/promote: updated entry + full permission list."""
+    entry: EntryResponse
+    permissions: list[EntryPermissionResponse]
 
 
 class PathPermissionResponse(BaseModel):
