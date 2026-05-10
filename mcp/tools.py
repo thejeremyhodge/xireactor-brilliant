@@ -572,6 +572,109 @@ def register_tools(mcp: FastMCP, api: BrilliantClient) -> None:
         )
 
     # -------------------------------------------------------------------
+    # Zone tools (Sprint 0051)
+    # -------------------------------------------------------------------
+
+    @mcp.tool()
+    async def list_zone(limit: int = 50, offset: int = 0) -> dict:
+        """List the calling user's personal-zone entries.
+
+        Wraps ``GET /zone``. Returns entries explicitly bound to the
+        caller's zone group — only the caller sees their own zone, even
+        if they are an org admin (zone privacy is an explicit safety
+        property of the personal-zones design).
+
+        Parameters:
+          limit   — page size, default 50, max 200
+          offset  — pagination offset, default 0
+
+        Returns:
+          {
+            "entries": [<EntryResponse>, ...],
+            "total":   <int>,
+            "limit":   <int>,
+            "offset":  <int>
+          }
+        """
+        user_id = _resolve_act_as_user_id()
+        return await api.get(
+            "/zone",
+            params={"limit": limit, "offset": offset},
+            act_as=user_id,
+        )
+
+    @mcp.tool()
+    async def promote_entry(
+        entry_id: str,
+        add_principals: list[dict],
+        new_sensitivity: str | None = None,
+    ) -> dict:
+        """Promote a zone entry by adding principals and/or bumping sensitivity.
+
+        Wraps ``POST /zone/promote``. Promotion is additive — the caller's
+        zone grant is preserved so the user never loses access to their
+        own data. The caller must be admin on the entry, and the entry
+        must currently sit in the caller's zone.
+
+        Parameters:
+          entry_id          — UUID of the entry to promote.
+          add_principals    — list of grants to add. Each item is a dict
+                              with keys:
+                                principal_type — 'user' or 'group'
+                                principal_id   — UUID string
+                                role           — 'admin' | 'editor' |
+                                                 'commenter' | 'viewer'
+          new_sensitivity   — optional sensitivity bump. Cannot downgrade
+                              a non-private entry back to 'private'
+                              (use the entry update path for that).
+
+        Returns:
+          {
+            "entry":       <EntryResponse>,        # post-update entry
+            "permissions": [<EntryPermissionResponse>, ...],
+            "summary":     "<human-readable confirmation string>"
+          }
+
+        On API errors (4xx — bad principal type/role, missing admin on
+        entry, entry not in caller's zone) returns the structured error
+        dict from BrilliantClient (``{"error": True, "status": <int>,
+        "detail": ...}``) without raising.
+        """
+        user_id = _resolve_act_as_user_id()
+        body: dict = {
+            "entry_id": entry_id,
+            "add_principals": list(add_principals),
+        }
+        if new_sensitivity is not None:
+            body["new_sensitivity"] = new_sensitivity
+
+        result = await api.post("/zone/promote", json=body, act_as=user_id)
+
+        # Pass structured errors straight through — caller (or LLM) sees
+        # the same shape as every other tool's 4xx surface.
+        if not isinstance(result, dict) or result.get("error") is True:
+            return result
+
+        # Build a short human-readable summary so the LLM can confirm the
+        # grant in chat without re-deriving it from the permissions list.
+        entry = result.get("entry") or {}
+        title = entry.get("title") or entry_id
+        parts: list[str] = []
+        for ap in add_principals:
+            ptype = ap.get("principal_type", "?")
+            pid = ap.get("principal_id", "?")
+            role = ap.get("role", "?")
+            parts.append(f"added {ptype} {pid} as {role}")
+        if new_sensitivity is not None:
+            parts.append(f"sensitivity now {new_sensitivity!r}")
+        summary = (
+            f"Promoted entry {title} — " + "; ".join(parts)
+            if parts
+            else f"Promoted entry {title} — no changes applied"
+        )
+        return {**result, "summary": summary}
+
+    # -------------------------------------------------------------------
     # Governance tools
     # -------------------------------------------------------------------
 
