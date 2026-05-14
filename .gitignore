@@ -53,3 +53,7 @@ scripts/private/
 skill/.xireactor/
 .claude/
 .pi/
+
+# Downstream private overlays — anything under a `private/` directory at any
+# depth is reserved for proprietary forks (see docs/downstream-overlay.md).
+**/private/
