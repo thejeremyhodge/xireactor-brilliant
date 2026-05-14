@@ -109,3 +109,7 @@ Tools are thin wrappers over the HTTP client (`mcp/client.py`), which makes call
 ## Multi-Tenancy
 
 Row-level multi-tenancy via `org_id` on every data table. A single deployment hosts multiple organizations with strict isolation enforced at the Postgres level through RLS policies (not application-level filtering). Every query passes through `org_id = current_setting('app.org_id')` predicates. Granular permissions layer on top: Google Workspace-style org roles (admin/editor/commenter/viewer) + optional per-entry and per-path ACL grants (user or group principals) that can only widen access, never restrict it beyond the sensitivity ceiling. See `db/migrations/004_rls.sql` and `db/migrations/018_permissions_v2.sql`.
+
+## Downstream Plugin Discovery
+
+Both the FastAPI app and the MCP server auto-load plugins on startup, letting private forks extend the deployment without editing upstream files. API plugins live in `api/plugins/` (or `XIREACTOR_API_PLUGIN_DIR`) and expose `register(app)`; MCP plugins live in `mcp/plugins/` (or `XIREACTOR_MCP_PLUGIN_DIR`) and expose `register(mcp, api)`. Loading is fail-soft — a raising plugin is logged and skipped. See [docs/downstream-overlay.md](docs/downstream-overlay.md).

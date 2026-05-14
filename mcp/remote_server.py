@@ -769,6 +769,16 @@ async def _oauth_continue(request: Request) -> Response:
 api = BrilliantClient()
 register_tools(mcp, api)
 
+# Downstream plugin discovery (see docs/downstream-overlay.md). Loads any
+# module in mcp/plugins/ or in XIREACTOR_MCP_PLUGIN_DIR that exposes
+# register(mcp, api). Fail-soft: errors are logged, never fatal.
+try:
+    from plugins import load_plugins as _load_mcp_plugins
+
+    _load_mcp_plugins(mcp, api)
+except Exception:  # pragma: no cover - defensive
+    logger.exception("Plugin loader failed")
+
 
 def create_app():
     """Create the Starlette ASGI app with CORS middleware for deployment."""

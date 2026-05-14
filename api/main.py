@@ -224,3 +224,15 @@ for module_path, attr_name, prefix in _route_modules:
             app.include_router(router, prefix=prefix)
     except ImportError:
         pass  # Route module not yet implemented
+
+# Downstream plugin discovery (see docs/downstream-overlay.md). Loads any
+# module in api/plugins/ or in XIREACTOR_API_PLUGIN_DIR that exposes
+# register(app). Fail-soft: errors are logged, never fatal.
+try:
+    from plugins import load_plugins as _load_api_plugins
+
+    _load_api_plugins(app)
+except Exception:  # pragma: no cover - defensive
+    import logging
+
+    logging.getLogger("brilliant.plugins").exception("Plugin loader failed")
