@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-05-24 — Hotfix: `create_link` & `GET /zone` 500s
+
+### Fixed
+- **`[fix]` `create_link` 500 on duplicate links** — both link-write paths did a bare `INSERT INTO entry_links … RETURNING …` with no `ON CONFLICT` clause, so re-creating an already-existing `(source, target, link_type)` link tripped the unique constraint (`UniqueViolation`), aborted the transaction, and surfaced as a bare 500. Affected the staging promote path (`POST /staging` with `change_type='create_link'`, used by agent keys) and the direct route (`POST /entries/{id}/links`, used by interactive keys via the MCP `create_link` tool). Both now `ON CONFLICT (org_id, source_entry_id, target_entry_id, link_type) DO UPDATE SET weight, metadata RETURNING id` — duplicate links are idempotent (weight/metadata refreshed, existing id returned) instead of 500ing.
+- **`[fix]` `create_link` 500 on out-of-range `weight` / unknown `link_type`** — `weight` and `link_type` were passed straight to the INSERT, so values outside the DB `CHECK` constraints (`weight BETWEEN 0 AND 1`; `link_type IN (…)`) leaked as a `CheckViolation` 500. `LinkCreate.weight` is now bounded `[0, 1]` (auto-422 on the direct route), and the staging promote path explicitly validates both `weight` and `link_type` (422) before the INSERT — the staging path previously validated neither.
+- **`[fix]` `GET /zone` 500 (`AmbiguousColumn`)** — `list_zone_entries` selects entry columns from a query that joins `permissions` (which also has `id` / `org_id` / `created_at`), but the column list was unqualified, so Postgres raised `column reference "id" is ambiguous` at plan time → 500 on every `GET /zone` call regardless of data. Fixed by selecting an `entries`-alias-qualified column list in the join query. No migration. The endpoint previously had zero test coverage, which is how it shipped in v0.10.0; a happy-path read test now guards it.
+- **`[docs]` Release-cut zip command dropped `_version.py` from the skill bundle** — CONTRIBUTING's documented re-zip used `zip -FS … SKILL.md references/api-reference.md`, but `-FS` filesync mode deletes archive entries not named on the command line, so each release silently dropped `skill/_version.py` from the bundle. The command now lists `_version.py` explicitly.
+
+### Changed
+- **`MIN_SKILL_VERSION` held at `0.7.0`** — these are bug fixes with no MCP tool-surface or response-shape change (valid inputs behave identically; only previously-500ing invalid/duplicate inputs change, to 4xx/idempotent success). `API_VERSION` / `MCP_VERSION` / `LATEST_SKILL_VERSION` / `skill_version` bumped to `0.10.1`.
+
 ## [0.10.0] — 2026-05-09 — Personal Zones (default-safety write target)
 
 ### Added

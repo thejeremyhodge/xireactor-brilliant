@@ -70,6 +70,8 @@ async def create_link(
                 %(link_type)s, %(weight)s, %(metadata)s,
                 %(created_by)s, %(source)s
             )
+            ON CONFLICT (org_id, source_entry_id, target_entry_id, link_type)
+            DO UPDATE SET weight = EXCLUDED.weight, metadata = EXCLUDED.metadata
             RETURNING id, source_entry_id, target_entry_id,
                       link_type, weight, metadata,
                       created_by, source, created_at

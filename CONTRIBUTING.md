@@ -122,9 +122,9 @@ The Sprint 0048 version handshake means four version strings now travel together
 4. Decide whether to bump `MIN_SKILL_VERSION` (see criteria below). When in doubt, **don't bump** — spurious refusals are worse than a missing warning.
 5. Bump `MCP_VERSION` in `mcp/_version.py` to match `API_VERSION`.
 6. Bump `skill_version` in `skill/SKILL.md` frontmatter to match `API_VERSION`.
-7. Re-zip the skill bundle with explicit paths (macOS zip 3.0 silently drops files when given a directory wildcard — see the relevant feedback memory):
+7. Re-zip the skill bundle with explicit paths (macOS zip 3.0 silently drops files when given a directory wildcard — see the relevant feedback memory). List **every** bundled file: `-FS` filesync mode *deletes* archive entries not named on the command line, so omitting `_version.py` silently drops it from the bundle:
    ```bash
-   cd skill && zip -FS brilliant-kb-assistant.zip SKILL.md references/api-reference.md
+   cd skill && zip -FS brilliant-kb-assistant.zip SKILL.md _version.py references/api-reference.md
    ```
 8. Add a `## [x.y.z] — YYYY-MM-DD — <headline>` entry to `CHANGELOG.md` summarising what changed.
 9. Squash-merge `dev` → `main`, tag `vx.y.z`, and `gh release create vx.y.z` (the GHCR image publish + shields.io release badge both depend on the GitHub Release object, not just the tag).

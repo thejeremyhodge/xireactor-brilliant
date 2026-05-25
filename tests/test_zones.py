@@ -752,3 +752,26 @@ def test_mcp_promote_entry_happy_path(shared_group):
             _os.environ.pop("BRILLIANT_SERVICE_API_KEY", None)
         else:
             _os.environ["BRILLIANT_SERVICE_API_KEY"] = prev_key
+
+
+# ---------------------------------------------------------------------------
+# Test — GET /zone read path (list_zone_entries).
+# Regression: the SELECT joins `permissions` (which also has id/org_id/
+# created_at), so unqualified columns raised AmbiguousColumn → 500 on Render.
+# This read endpoint had zero coverage, which is how the 500 shipped.
+# ---------------------------------------------------------------------------
+
+
+def test_list_zone_returns_entries_no_ambiguous_column():
+    """A default-write entry must be readable back via GET /zone with 200.
+    Guards the AmbiguousColumn 500 in the entries⋈permissions join."""
+    entry = _create_entry(EDITOR_KEY)  # sensitivity omitted → lands in zone
+    try:
+        r = _get("/zone", EDITOR_KEY, {"limit": 50, "offset": 0})
+        assert r.status_code == 200, f"GET /zone 500'd: {r.status_code} {r.text}"
+        body = r.json()
+        ids = {e["id"] for e in body["entries"]}
+        assert entry["id"] in ids, f"zone entry missing from list: {body}"
+        assert body["total"] >= 1, body
+    finally:
+        _archive(entry["id"])

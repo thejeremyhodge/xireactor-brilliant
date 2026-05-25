@@ -18,6 +18,7 @@ from models import (
     StagingList,
     StagingResponse,
     StagingSubmit,
+    VALID_LINK_TYPES,
 )
 from services.access_log import log_entry_reads
 from services.ai_reviewer import review_staging_item
@@ -500,6 +501,23 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 detail="create_link requires source_entry_id and target_entry_id in proposed_meta",
             )
 
+        # Validate against the entry_links CHECK constraints so a bad value
+        # surfaces as a 422 instead of a bare 500 (CheckViolation) at INSERT.
+        if link_type not in VALID_LINK_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid link_type '{link_type}'. Must be one of: {sorted(VALID_LINK_TYPES)}",
+            )
+        try:
+            weight = float(weight)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="create_link weight must be a number")
+        if not 0 <= weight <= 1:
+            raise HTTPException(
+                status_code=422,
+                detail="create_link weight must be between 0 and 1",
+            )
+
         cur = await conn.execute(
             """
             INSERT INTO entry_links (
@@ -507,6 +525,8 @@ async def _promote_staging_item(conn, staging: dict, approver_id: str) -> dict:
                 link_type, weight, metadata,
                 created_by, source
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (org_id, source_entry_id, target_entry_id, link_type)
+            DO UPDATE SET weight = EXCLUDED.weight, metadata = EXCLUDED.metadata
             RETURNING id
             """,
             (

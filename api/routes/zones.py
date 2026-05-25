@@ -51,6 +51,14 @@ _ENTRY_COLS = """
     claim_type, source_confidence, verification_status, conflict_with
 """
 
+# Same columns qualified with the ``entries`` alias ``e`` — required whenever
+# the SELECT joins another table that shares column names (e.g. ``permissions``
+# also has ``id``/``org_id``/``created_at``), otherwise Postgres raises
+# AmbiguousColumn. Derived from _ENTRY_COLS so the two can't drift.
+_ENTRY_COLS_E = ", ".join(
+    f"e.{col.strip()}" for col in _ENTRY_COLS.split(",") if col.strip()
+)
+
 _ENTRY_PERM_COLS = (
     "id, entry_id, principal_type, principal_id, role, granted_by, created_at"
 )
@@ -129,7 +137,7 @@ async def list_zone_entries(
 
         cur = await conn.execute(
             f"""
-            SELECT {_ENTRY_COLS}
+            SELECT {_ENTRY_COLS_E}
             FROM entries e
             JOIN permissions p ON p.entry_id = e.id
             WHERE p.resource_type = 'entry'

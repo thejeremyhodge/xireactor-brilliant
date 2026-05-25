@@ -15,9 +15,9 @@ See ``mcp/tools.py::get_version`` for the consumer side, and
 ``CONTRIBUTING.md`` "Cutting a release" for the bump procedure.
 """
 
-API_VERSION = "0.10.0"
+API_VERSION = "0.10.1"
 MIN_SKILL_VERSION = "0.7.0"
-LATEST_SKILL_VERSION = "0.10.0"
+LATEST_SKILL_VERSION = "0.10.1"
 SKILL_DOWNLOAD_URL = (
     "https://github.com/thejeremyhodge/xireactor-brilliant/releases/latest"
 )

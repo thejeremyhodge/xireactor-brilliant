@@ -10,4 +10,4 @@ version files is the symptom of a missed step in the release-cut dance
 (see ``CONTRIBUTING.md`` "Cutting a release").
 """
 
-SKILL_VERSION = "0.10.0"
+SKILL_VERSION = "0.10.1"

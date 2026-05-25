@@ -408,3 +408,84 @@ def test_meta_only_update_does_not_collide_on_empty_hash(fresh_entry):
         assert r2.json()["status"] == "auto_approved", r2.json()
     finally:
         _archive(other["id"])
+
+
+# ---------------------------------------------------------------------------
+# Tests — create_link idempotency (staging.py:503 UniqueViolation regression)
+# ---------------------------------------------------------------------------
+
+
+def test_create_link_is_idempotent_no_500_on_duplicate(fresh_entry):
+    """Regression: promoting a `create_link` staging item used to do a bare
+    INSERT into entry_links with no ON CONFLICT clause. Submitting a link that
+    already existed tripped the
+    `entry_links_org_id_source_entry_id_target_entry_id_link_typ_key`
+    unique constraint, aborting the txn and surfacing as a bare 500 on
+    POST /staging. The promote path now upserts, so a duplicate create_link
+    must succeed idempotently instead of 500ing.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    target = _create_entry(
+        title=f"link-target-{suffix}",
+        content="Link target body.",
+        logical_path=f"staging-tests/link-target-{suffix}",
+    )
+
+    def _submit_link() -> requests.Response:
+        return _submit_staging({
+            "target_entry_id": None,
+            "target_path": fresh_entry["logical_path"],
+            "change_type": "create_link",
+            "proposed_meta": {
+                "source_entry_id": fresh_entry["id"],
+                "target_entry_id": target["id"],
+                "link_type": "relates_to",
+            },
+        })
+
+    try:
+        r1 = _submit_link()
+        assert r1.status_code == 201, f"first create_link failed: {r1.status_code} {r1.text}"
+        assert r1.json()["status"] == "auto_approved", r1.json()
+
+        # The duplicate that previously 500'd on the UniqueViolation.
+        r2 = _submit_link()
+        assert r2.status_code == 201, f"duplicate create_link 500'd: {r2.status_code} {r2.text}"
+        assert r2.json()["status"] == "auto_approved", r2.json()
+    finally:
+        _archive(target["id"])
+
+
+def test_create_link_invalid_weight_or_type_returns_422_not_500(fresh_entry):
+    """create_link via staging must reject an out-of-range weight or an
+    unknown link_type with a 422, instead of leaking the entry_links CHECK
+    constraints as a bare 500 at promote-time INSERT."""
+    suffix = uuid.uuid4().hex[:8]
+    target = _create_entry(
+        title=f"link-target-{suffix}",
+        content="Link target body.",
+        logical_path=f"staging-tests/link-target-{suffix}",
+    )
+
+    def _submit_link(meta_overrides: dict) -> requests.Response:
+        meta = {
+            "source_entry_id": fresh_entry["id"],
+            "target_entry_id": target["id"],
+            "link_type": "relates_to",
+        }
+        meta.update(meta_overrides)
+        return _submit_staging({
+            "target_entry_id": None,
+            "target_path": fresh_entry["logical_path"],
+            "change_type": "create_link",
+            "proposed_meta": meta,
+        })
+
+    try:
+        r_weight = _submit_link({"weight": 2.0})
+        assert r_weight.status_code == 422, f"bad weight: {r_weight.status_code} {r_weight.text}"
+
+        r_type = _submit_link({"link_type": "references"})
+        assert r_type.status_code == 422, f"bad link_type: {r_type.status_code} {r_type.text}"
+    finally:
+        _archive(target["id"])

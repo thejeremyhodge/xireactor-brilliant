@@ -153,7 +153,7 @@ VALID_LINK_TYPES = {
 class LinkCreate(BaseModel):
     target_entry_id: str
     link_type: str  # relates_to, supersedes, contradicts, depends_on, part_of, tagged_with
-    weight: float = 1.0
+    weight: float = Field(default=1.0, ge=0, le=1)  # matches entry_links CHECK (weight BETWEEN 0 AND 1)
     metadata: dict = {}
 
 
