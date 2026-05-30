@@ -30,6 +30,7 @@
   <a href="#deploy-to-render">Deploy to Render</a> •
   <a href="#self-host-with-installsh">Self-host</a> •
   <a href="#connect-claude">Connect Claude</a> •
+  <a href="#api-documentation">API Docs</a> •
   <a href="ARCHITECTURE.md">Architecture</a> •
   <a href="CHANGELOG.md">Changelog</a> •
   <a href="ROADMAP.md">Roadmap</a>
@@ -252,6 +253,24 @@ Concurrent-writer stress results (20–120 clients, flat ~178 ops/s, 99.8%+ succ
 - **`tools/vault_import.py`** — CLI helper for Obsidian vault import
 
 Full component boundaries, data flow, and design decisions: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
+## API documentation
+
+The REST API is self-documenting. Every running Brilliant instance serves interactive, always-current docs generated from the live code:
+
+| URL | What it is |
+|---|---|
+| `/docs` | **Swagger UI** — interactive reference with "try it" buttons. Start here if you're a human. |
+| `/redoc` | **ReDoc** — a cleaner, read-oriented rendering of the same reference. |
+| `/openapi.json` | The **OpenAPI schema** — the machine-readable contract. Start here if you're an agent. |
+
+For example, on a local install: `http://localhost:8010/docs`.
+
+**Integrating an agent directly over REST (no MCP)?** Point your client at `/openapi.json` — it describes every endpoint, parameter, and response shape mechanically, so the agent can discover the surface without a hand-written guide. Authenticate by sending `Authorization: Bearer <api_key>` on every request (mint a key with `POST /auth/login`). Application/frontend routes live under `/kb/`.
+
+The hand-curated [`skill/references/api-reference.md`](skill/references/api-reference.md) remains the richest narrative reference — auth conventions, enum tables, and worked `curl` examples — and is bundled into the Claude skill.
 
 ---
 

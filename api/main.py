@@ -8,6 +8,7 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from _version import API_VERSION
 from database import init_pool, close_pool, get_pool
 from admin_bootstrap import ensure_admin_user
 from middleware.request_log import RequestLogMiddleware
@@ -107,8 +108,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="xiReactor Brilliant API",
-    description="Knowledge base API with RLS-enforced permissions and governance pipeline",
-    version="0.4.0",
+    description=(
+        "Knowledge base API with RLS-enforced permissions and a governance "
+        "pipeline. Humans and AI agents share the same governed context layer.\n\n"
+        "**Integrating an agent without MCP?** This OpenAPI schema "
+        "(`/openapi.json`) is the canonical, machine-readable contract — point "
+        "your client at it to discover every endpoint, parameter, and response "
+        "shape. **Auth:** send `Authorization: Bearer <api_key>` on every "
+        "request (get a key from `POST /auth/login`). Frontend/app routes live "
+        "under `/kb/`."
+    ),
+    version=API_VERSION,
     lifespan=lifespan,
     redirect_slashes=False,
 )
