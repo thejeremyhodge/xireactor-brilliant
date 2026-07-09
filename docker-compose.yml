@@ -27,7 +27,7 @@ services:
       # never through this mount — see install.sh phase_seed.
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d brilliant"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-brilliant}"]
       interval: 5s
       timeout: 5s
       retries: 5

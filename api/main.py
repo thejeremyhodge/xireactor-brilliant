@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from psycopg import OperationalError
+from psycopg_pool import PoolTimeout
 
 from database import init_pool, close_pool, get_pool
 from admin_bootstrap import ensure_admin_user
@@ -126,6 +128,32 @@ app.add_middleware(
 # (Starlette prepends on add_middleware + reverses on build, so last-added
 # wraps everything). This lets us time the full stack including CORS + auth.
 app.add_middleware(RequestLogMiddleware)
+
+
+@app.exception_handler(PoolTimeout)
+async def pool_timeout_exception_handler(request, exc):
+    logger.error("Database connection pool timeout: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "message": "Database connection pool timeout. The database server may be offline or overloaded.",
+            "error_type": "DatabaseTimeout",
+            "detail": str(exc)
+        }
+    )
+
+
+@app.exception_handler(OperationalError)
+async def db_operational_error_handler(request, exc):
+    logger.error("Database connection failed: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "message": "Database connection failed. The database server may be unreachable.",
+            "error_type": "DatabaseConnectionError",
+            "detail": str(exc)
+        }
+    )
 
 
 @app.get("/health")
